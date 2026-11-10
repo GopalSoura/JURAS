@@ -4,7 +4,7 @@ React + Vite + TypeScript frontend, FastAPI backend, simulation-first sensors.
 ## Start backend (Windows)
 ```powershell
 cd backend
-py -m venv .venv
+python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload
