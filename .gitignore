@@ -1,0 +1,14 @@
+# Python environments and generated files
+backend/.venv/
+backend/.venv*/
+__pycache__/
+*.py[cod]
+
+# Node.js dependencies and build output
+frontend/node_modules/
+frontend/dist/
+
+# Local environment settings
+.env
+.env.*
+!.env.example

@@ -5,18 +5,32 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "sim:check": "tsx scripts/sim-check.ts"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "react-leaflet": "latest",
-    "leaflet": "latest",
-    "lucide-react": "latest"
+    "@deck.gl/core": "^9.1.0",
+    "@deck.gl/geo-layers": "^9.1.0",
+    "@deck.gl/layers": "^9.1.0",
+    "@deck.gl/mapbox": "^9.1.0",
+    "echarts": "^5.5.1",
+    "maplibre-gl": "^4.7.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.0"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.14",
+    "tsx": "^4.19.0",
+    "typescript": "~5.6.3",
+    "vite": "^5.4.10"
+  }
 }
