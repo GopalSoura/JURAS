@@ -12,6 +12,55 @@ export type SensorKind = 'smoke_temp' | 'structure' | 'rain_level';
 export type Profile = 'fire_truck' | 'medical' | 'evacuation';
 export type FeedStatus = 'connecting' | 'live' | 'sim' | 'offline';
 
+/* ---------- real OSM navigation (backend /api/v1/routes/navigate) ---------- */
+export type NavProfile = 'fire_truck' | 'responder_bike' | 'walking';
+
+export interface NavOrigin {
+  id: string;
+  label: string;
+  pos: LonLat;
+}
+
+export interface NavSnap {
+  lat: number;
+  lng: number;
+  snapped: { lat: number; lng: number };
+  snap_distance_m: number;
+  edge_id: string;
+  way_id: string;
+  road_name: string;
+  highway: string;
+  oneway: 'both' | 'forward' | 'backward';
+}
+
+export interface NavRouteProperties {
+  distance_m: number;
+  duration_s: number | null;
+  profile: NavProfile;
+  weighting: string;
+  algorithm: string;
+  duration_basis?: string | null;
+  geometry_source: string;
+  edge_count: number;
+  edge_ids: string[];
+  warnings: string[];
+  origin_snap_distance_m: number;
+  destination_snap_distance_m: number;
+}
+
+export interface NavRouteFeature {
+  type: 'Feature';
+  geometry: { type: 'LineString'; coordinates: LonLat[] };
+  properties: NavRouteProperties;
+}
+
+export interface NavResponse {
+  route: NavRouteFeature;
+  origin: NavSnap;
+  destination: NavSnap;
+  warnings: string[];
+}
+
 export interface Building {
   id: string;
   name: string;

@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "sim:check": "tsx scripts/sim-check.ts"
+    "sim:check": "tsx scripts/sim-check.ts",
+    "nav:check": "tsx scripts/nav-check.ts"
   },
   "dependencies": {
     "@deck.gl/core": "^9.1.0",
