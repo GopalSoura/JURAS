@@ -2,13 +2,14 @@ import type { ReactNode } from 'react';
 import { useStore } from '../store';
 import type { ModuleId } from '../types';
 import { BuildingCard, FeedCard, Kpis, RoutesCard, SafetyCard, StormCard } from './cards';
+import { NavigationCard } from './NavigationCard';
 
 const ORDER: Record<ModuleId, ReactNode[]> = {
-  overview: [<Kpis key="k" />, <RoutesCard key="r" />, <SafetyCard key="s" />, <BuildingCard key="b" />, <StormCard key="w" />, <FeedCard key="f" />],
-  fire: [<RoutesCard key="r" />, <Kpis key="k" />, <SafetyCard key="s" />, <FeedCard key="f" />],
+  overview: [<Kpis key="k" />, <NavigationCard key="n" />, <RoutesCard key="r" />, <SafetyCard key="s" />, <BuildingCard key="b" />, <StormCard key="w" />, <FeedCard key="f" />],
+  fire: [<NavigationCard key="n" />, <RoutesCard key="r" />, <Kpis key="k" />, <SafetyCard key="s" />, <FeedCard key="f" />],
   structure: [<BuildingCard key="b" />, <Kpis key="k" />, <SafetyCard key="s" />, <FeedCard key="f" />],
   flood: [<StormCard key="w" />, <RoutesCard key="r" />, <Kpis key="k" />, <FeedCard key="f" />],
-  routing: [<RoutesCard key="r" />, <StormCard key="w" />, <Kpis key="k" />],
+  routing: [<NavigationCard key="n" />, <RoutesCard key="r" />, <StormCard key="w" />, <Kpis key="k" />],
   sensors: [<FeedCard key="f" />, <Kpis key="k" />, <StormCard key="w" />, <BuildingCard key="b" />],
 };
 
