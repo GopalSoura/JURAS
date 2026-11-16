@@ -7,7 +7,7 @@ import { CanvasRenderer } from 'echarts/renderers';
 
 echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, MarkLineComponent, CanvasRenderer]);
 
-export const CHART = { text: '#8495bf', grid: '#16213f', axis: '#26365f', cyan: '#3db4ff', green: '#2fe39a', amber: '#ffb02e', red: '#ff4d5e' };
+export const CHART = { text: '#7c8aa5', grid: '#161e2c', axis: '#232d40', cyan: '#4d9fff', green: '#46c08a', amber: '#e0a63c', red: '#e35d6a' };
 
 export function Chart({ option, height }: { option: EChartsCoreOption; height: number }) {
   const ref = useRef<HTMLDivElement>(null);

@@ -34,9 +34,9 @@ export default function App() {
       key={t}
       onClick={() => setTab(t)}
       aria-current={tab === t ? 'page' : undefined}
-      className={`flex flex-1 flex-col items-center gap-0.5 py-1.5 text-[11px] ${tab === t ? 'text-cyan' : 'text-dim'}`}
+      className={`flex flex-1 flex-col items-center gap-0.5 py-1.5 text-[10.5px] tracking-wide ${tab === t ? 'text-accent' : 'text-dim'}`}
     >
-      <Icon name={icon} size={18} />
+      <Icon name={icon} size={16} />
       {label}
     </button>
   );
@@ -44,7 +44,7 @@ export default function App() {
   return (
     <div className="flex h-full flex-col">
       <TopBar />
-      <main className="relative flex min-h-0 flex-1 lg:grid lg:grid-cols-[340px_minmax(0,1fr)_376px]">
+      <main className="relative flex min-h-0 flex-1 lg:grid lg:grid-cols-[336px_minmax(0,1fr)_360px]">
         <AlertsPanel className={`${show('alerts')} w-full lg:flex lg:w-auto`} />
         <div className={`${show('map')} relative min-h-0 min-w-0 flex-1 lg:flex`}>
           <MapView />

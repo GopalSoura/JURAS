@@ -3,17 +3,20 @@
 @tailwind utilities;
 
 :root {
-  --bg: #060a14;
-  --panel: #0b1224;
-  --panel2: #111c38;
-  --line: #1d2b4d;
-  --text: #dbe6ff;
-  --dim: #8495bf;
-  --cyan: #3db4ff;
-  --green: #2fe39a;
-  --amber: #ffb02e;
-  --red: #ff4d5e;
-  --orange: #ff7a3d;
+  --bg: #05070d;
+  --panel: #0a0e18;
+  --panel2: #101623;
+  --raise: #141b29;
+  --line: #1c2536;
+  --line-strong: #273245;
+  --text: #d7dfec;
+  --dim: #7c8aa5;
+  --faint: #5a677f;
+  --accent: #4d9fff;
+  --green: #46c08a;
+  --amber: #e0a63c;
+  --red: #e35d6a;
+  --orange: #e07a45;
   color-scheme: dark;
 }
 
@@ -25,60 +28,69 @@ body {
   font-family: 'IBM Plex Sans', system-ui, sans-serif;
   font-size: 13px;
   overflow: hidden;
+  -webkit-font-smoothing: antialiased;
 }
 button { font: inherit; color: inherit; cursor: pointer; }
 .num { font-variant-numeric: tabular-nums; }
 
+/* Flat surfaces: solid fills, hairline borders, sharp corners. */
 .panel {
-  background: linear-gradient(180deg, rgba(17, 28, 56, 0.94), rgba(9, 15, 31, 0.96));
+  background: var(--panel);
   border: 1px solid var(--line);
 }
 .card {
-  background: rgba(17, 28, 56, 0.72);
+  background: var(--panel2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 3px;
 }
 .label {
-  font-family: 'Chakra Petch', sans-serif;
-  font-size: 11px;
-  letter-spacing: 0.12em;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
   text-transform: uppercase;
   color: var(--dim);
 }
-.scroll { overflow-y: auto; scrollbar-width: thin; scrollbar-color: #26365f transparent; }
-.scroll::-webkit-scrollbar { width: 6px; }
-.scroll::-webkit-scrollbar-thumb { background: #26365f; border-radius: 3px; }
+.scroll { overflow-y: auto; scrollbar-width: thin; scrollbar-color: #232d40 transparent; }
+.scroll::-webkit-scrollbar { width: 5px; }
+.scroll::-webkit-scrollbar-thumb { background: #232d40; border-radius: 2px; }
+.scroll::-webkit-scrollbar-track { background: transparent; }
 
 .btn {
-  border: 1px solid var(--line);
-  background: rgba(24, 38, 74, 0.8);
-  border-radius: 5px;
-  padding: 5px 10px;
-  transition: background 0.15s, border-color 0.15s;
+  border: 1px solid var(--line-strong);
+  background: var(--raise);
+  border-radius: 3px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text);
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
 }
-.btn:hover { background: rgba(40, 62, 118, 0.9); border-color: #35508f; }
-.btn:focus-visible, button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.btn:hover { background: #1a2334; border-color: #34415a; }
+.btn:focus-visible, button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
-/* map DOM markers */
+/* Map DOM markers — flat, no glow. */
 .mk-chip {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 3px 8px; border-radius: 12px;
-  background: rgba(8, 14, 30, 0.92); border: 1px solid rgba(120, 160, 255, 0.35);
+  padding: 3px 8px; border-radius: 3px;
+  background: rgba(8, 11, 18, 0.94); border: 1px solid rgba(120, 145, 185, 0.32);
   font-size: 11px; white-space: nowrap; color: var(--text);
   font-variant-numeric: tabular-nums; pointer-events: none;
 }
-.mk-chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.mk-chip i { width: 7px; height: 7px; border-radius: 1px; display: inline-block; }
 .mk-incident {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 4px 10px; border-radius: 6px; white-space: nowrap;
-  background: rgba(255, 77, 94, 0.18); border: 1px solid rgba(255, 77, 94, 0.8);
-  color: #ffd9dd; font-family: 'Chakra Petch', sans-serif; font-size: 12px; font-weight: 600;
-  box-shadow: 0 0 18px rgba(255, 77, 94, 0.45); pointer-events: none; margin-bottom: 28px;
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 4px 9px; border-radius: 3px; white-space: nowrap;
+  background: rgba(30, 12, 15, 0.92); border: 1px solid var(--red);
+  color: #f0c9cd; font-size: 11.5px; font-weight: 600;
+  letter-spacing: 0.02em;
+  pointer-events: none; margin-bottom: 26px;
 }
-.mk-incident.sev-high { background: rgba(255, 122, 61, 0.16); border-color: rgba(255, 122, 61, 0.8); color: #ffe0cf; box-shadow: 0 0 14px rgba(255, 122, 61, 0.35); }
-.maplibregl-ctrl-attrib { background: rgba(6, 10, 20, 0.7) !important; color: #6f80a8 !important; }
-.maplibregl-ctrl-attrib a { color: #8ea3d6 !important; }
+.mk-incident.sev-high { background: rgba(30, 19, 10, 0.92); border-color: var(--orange); color: #efd0bd; }
+.mk-incident .mk-dot { width: 7px; height: 7px; border-radius: 1px; flex: none; }
+.maplibregl-ctrl-attrib { background: rgba(5, 7, 13, 0.72) !important; color: #5a677f !important; font-size: 10px !important; }
+.maplibregl-ctrl-attrib a { color: #7c8aa5 !important; }
 
-@keyframes blink { 50% { opacity: 0.35; } }
-.blink { animation: blink 1.1s ease-in-out infinite; }
+/* Restrained attention cue for critical items (opacity only, no scale/glow). */
+@keyframes blink { 50% { opacity: 0.4; } }
+.blink { animation: blink 1.6s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .blink { animation: none; } }

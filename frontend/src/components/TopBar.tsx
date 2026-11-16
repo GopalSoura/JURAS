@@ -7,7 +7,7 @@ import { SEV_META } from '../lib/meta';
 const STATUS = {
   sim: { text: 'SIMULATED FEED', color: 'var(--amber)' },
   live: { text: 'LIVE BACKEND', color: 'var(--green)' },
-  connecting: { text: 'CONNECTING', color: 'var(--cyan)' },
+  connecting: { text: 'CONNECTING', color: 'var(--accent)' },
   offline: { text: 'BACKEND OFFLINE', color: 'var(--red)' },
 } as const;
 
@@ -23,16 +23,16 @@ export function TopBar() {
   const clock = new Date(now).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false });
 
   return (
-    <header className="panel flex h-12 shrink-0 items-center gap-3 border-x-0 border-t-0 px-3 sm:px-4">
+    <header className="flex h-11 shrink-0 items-center gap-3 border-b border-line bg-panel px-3 sm:px-4">
       <div className="flex min-w-0 items-center gap-2.5">
-        <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true" className="shrink-0">
-          <rect x="1" y="1" width="24" height="24" rx="5" fill="#0f2b52" stroke="#3db4ff" strokeWidth="1.2" />
-          <path d="M5 17l4-5 4 3 4-7 4 5" fill="none" stroke="#3db4ff" strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" />
-          <circle cx="17" cy="8" r="1.8" fill="#2fe39a" />
+        <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" className="shrink-0">
+          <rect x="1" y="1" width="18" height="18" fill="none" stroke="var(--accent)" strokeWidth="1.2" />
+          <path d="M4 14l3.5-4 3 2.5L14 7l2 3" fill="none" stroke="var(--accent)" strokeWidth="1.3" strokeLinejoin="round" strokeLinecap="round" />
+          <circle cx="14.4" cy="6" r="1.2" fill="var(--green)" />
         </svg>
         <div className="min-w-0 leading-tight">
-          <div className="truncate font-display text-[14px] font-semibold tracking-wide">OLD JAMMU · RISK INTELLIGENCE</div>
-          <div className="hidden truncate text-[11px] text-dim sm:block">Urban digital twin · pilot zone · Detect, Understand, Prioritize, Act, Learn</div>
+          <div className="truncate text-[12.5px] font-semibold tracking-[0.08em] text-ink">JURAS · EMERGENCY OPERATIONS CENTER</div>
+          <div className="hidden truncate text-[10.5px] text-dim sm:block">Old Jammu pilot zone · urban risk intelligence</div>
         </div>
       </div>
 
@@ -40,28 +40,28 @@ export function TopBar() {
         {top ? (
           <button
             onClick={() => selectAlert(top.id)}
-            className="flex max-w-full items-center gap-2 rounded-md border px-3 py-1 font-display text-[13px] font-semibold"
-            style={{ borderColor: SEV_META[top.severity].color, color: SEV_META[top.severity].color, background: `${SEV_META[top.severity].color}1f` }}
+            className="flex max-w-full items-center gap-2 border bg-panel2 px-2.5 py-1 text-[12px] font-medium"
+            style={{ borderColor: SEV_META[top.severity].color + '88', color: SEV_META[top.severity].color }}
             title="Focus this incident"
           >
-            <span className="blink inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: SEV_META[top.severity].color }} />
+            <span className="blink inline-block h-1.5 w-1.5 shrink-0" style={{ background: SEV_META[top.severity].color }} />
             <span className="truncate">{top.title}</span>
-            <span className="num shrink-0 font-mono text-[12px] font-normal">{fmtElapsed(now - top.created_at)}</span>
+            <span className="num shrink-0 font-mono text-[11px] font-normal opacity-80">{fmtElapsed(now - top.created_at)}</span>
           </button>
         ) : (
-          <span className="text-[12px] text-good">No open incidents</span>
+          <span className="text-[11.5px] tracking-wide text-good">No open incidents</span>
         )}
       </div>
 
-      <div className="ml-auto flex shrink-0 items-center gap-3 text-[12px]">
-        <span className="hidden items-center gap-1.5 rounded-md border border-line px-2 py-1 text-dim sm:flex">
+      <div className="ml-auto flex shrink-0 items-center gap-2 text-[11.5px]">
+        <span className="hidden items-center gap-1.5 border border-line px-2 py-1 text-dim sm:flex">
           Rain <b className="num font-mono text-ink">{rain.toFixed(0)}</b> mm/h
         </span>
-        <span className="flex items-center gap-1.5 rounded-md border border-line px-2 py-1 font-display text-[11px] tracking-wider" style={{ color: st.color }}>
-          <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: st.color }} />
+        <span className="flex items-center gap-1.5 border px-2 py-1 text-[10.5px] font-semibold tracking-[0.08em]" style={{ borderColor: st.color + '55', color: st.color }}>
+          <span className="inline-block h-1.5 w-1.5" style={{ background: st.color }} />
           {st.text}
         </span>
-        <span className="num hidden font-mono text-[13px] text-ink md:block">
+        <span className="num hidden border border-line px-2 py-1 font-mono text-[12px] text-ink md:block">
           {clock} <span className="text-dim">IST</span>
         </span>
       </div>
