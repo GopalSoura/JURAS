@@ -1,11 +1,24 @@
 import { create } from 'zustand';
 import type {
-  Alert, Building, FeedStatus, FloodZone, Hazard, Intervention, LaneEdge, LaneNode, ModuleId, Route, SensorKind, SensorMeta, ServerMsg, Telemetry,
+  Alert, Building, FeedStatus, FloodZone, Hazard, Intervention, LaneEdge, LaneNode, ModuleId, NavOrigin, NavProfile, NavResponse, Route, SensorKind, SensorMeta, ServerMsg, Telemetry,
 } from './types';
 import { safetyScore } from './lib/metrics';
+import { fetchNavigation, ApiError } from './lib/api';
 
 export interface LogLine { ts: number; text: string; hot: boolean; kind: SensorKind }
 export interface Layers { osm: boolean; lanes: boolean; sensors: boolean; flood: boolean }
+export type NavStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+let navAbort: AbortController | null = null;
+
+function defaultNavOrigin(s: StoreState): NavOrigin | null {
+  if (s.navOrigin) return s.navOrigin;
+  const firePost = s.laneNodes.find((n) => n.kind === 'fire_post');
+  if (firePost) return { id: `node:${firePost.id}`, label: `${firePost.label} (fire post)`, pos: firePost.pos };
+  const post = s.laneNodes.find((n) => n.kind !== 'junction');
+  if (post) return { id: `node:${post.id}`, label: `${post.label} (staging point)`, pos: post.pos };
+  return null;
+}
 
 export interface StoreState {
   ready: boolean;
@@ -30,6 +43,14 @@ export interface StoreState {
   feedStatus: FeedStatus;
   feedLabel: string;
 
+  navRoute: NavResponse | null;
+  navStatus: NavStatus;
+  navError: string | null;
+  navErrorCode: string | null;
+  navProfile: NavProfile;
+  navOrigin: NavOrigin | null;
+  navTargetId: string | null;
+
   apply: (m: ServerMsg) => void;
   selectAlert: (id: string | null) => void;
   selectBuilding: (id: string | null) => void;
@@ -37,6 +58,11 @@ export interface StoreState {
   toggleLayer: (k: keyof Layers) => void;
   setFeed: (status: FeedStatus, label: string) => void;
   sample: () => void;
+  setNavOrigin: (o: NavOrigin | null) => void;
+  setNavProfile: (p: NavProfile) => void;
+  navigateToAlert: (id: string) => Promise<void>;
+  refreshNavigation: () => Promise<void>;
+  clearNavigation: () => void;
 }
 
 const fmt = (t: Telemetry): LogLine => {
@@ -69,6 +95,13 @@ export const useStore = create<StoreState>()((set, get) => ({
   layers: { osm: true, lanes: true, sensors: true, flood: true },
   feedStatus: 'connecting',
   feedLabel: '',
+  navRoute: null,
+  navStatus: 'idle',
+  navError: null,
+  navErrorCode: null,
+  navProfile: 'fire_truck',
+  navOrigin: null,
+  navTargetId: null,
 
   apply: (m) => {
     switch (m.t) {
@@ -133,6 +166,7 @@ export const useStore = create<StoreState>()((set, get) => ({
   },
 
   selectAlert: (id) => {
+    if (get().navTargetId && id !== null && id !== get().navTargetId) get().clearNavigation();
     const a = id ? get().alerts[id] : undefined;
     set({ selectedAlert: id, selectedBuilding: a?.building_id ?? get().selectedBuilding });
   },
@@ -143,5 +177,73 @@ export const useStore = create<StoreState>()((set, get) => ({
   sample: () => {
     const score = safetyScore(get().alerts);
     set({ riskHistory: [...get().riskHistory, { ts: Date.now(), score }].slice(-90) });
+  },
+
+  setNavOrigin: (navOrigin) => {
+    set({ navOrigin });
+    const target = get().navTargetId;
+    if (target) void get().navigateToAlert(target);
+  },
+  setNavProfile: (navProfile) => {
+    set({ navProfile });
+    const target = get().navTargetId;
+    if (target) void get().navigateToAlert(target);
+  },
+  navigateToAlert: async (id) => {
+    const alert = get().alerts[id];
+    if (!alert) {
+      set({ navStatus: 'error', navError: 'Incident is no longer available', navErrorCode: 'ALERT_NOT_FOUND' });
+      return;
+    }
+    const origin = defaultNavOrigin(get());
+    if (!origin) {
+      set({
+        navTargetId: id,
+        navStatus: 'error',
+        navError: 'No responder origin available. Add a fire post or enter custom coordinates.',
+        navErrorCode: 'NO_ORIGIN',
+      });
+      return;
+    }
+    navAbort?.abort();
+    const controller = new AbortController();
+    navAbort = controller;
+    set({
+      navTargetId: id,
+      navOrigin: origin,
+      navStatus: 'loading',
+      navError: null,
+      navErrorCode: null,
+    });
+    try {
+      const navRoute = await fetchNavigation(origin.pos, alert.pos, get().navProfile, controller.signal);
+      if (controller.signal.aborted) return;
+      set({ navRoute, navStatus: 'ready', navError: null, navErrorCode: null });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      const apiError = error instanceof ApiError ? error : null;
+      set({
+        navRoute: null,
+        navStatus: 'error',
+        navError:
+          apiError?.message ??
+          (error instanceof TypeError
+            ? 'Cannot reach the navigation API. Check the backend and VITE_API_URL.'
+            : 'Navigation request failed'),
+        navErrorCode: apiError?.code ?? 'NAVIGATION_UNAVAILABLE',
+      });
+    } finally {
+      if (navAbort === controller) navAbort = null;
+    }
+  },
+  refreshNavigation: async () => {
+    const target = get().navTargetId;
+    if (target) await get().navigateToAlert(target);
+  },
+  clearNavigation: () => {
+    navAbort?.abort();
+    navAbort = null;
+    set({ navRoute: null, navStatus: 'idle', navError: null, navErrorCode: null, navTargetId: null });
   },
 }));
