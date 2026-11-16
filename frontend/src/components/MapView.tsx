@@ -8,8 +8,10 @@ import { buildLayers, tooltipFor } from '../lib/layers';
 import { focusAlert, fmtEta, isOpen } from '../lib/metrics';
 import { pointAlong } from '../lib/geo';
 import { PROFILE_META } from '../lib/meta';
+import { navRouteBounds } from '../lib/navigation';
 import type { LonLat } from '../types';
 import { FLAME_SVG, Icon } from './icons';
+import { NavOverlay } from './NavOverlay';
 
 const HOME = { center: CONFIG.center, zoom: 16.6, pitch: 58, bearing: -24 };
 
@@ -28,10 +30,10 @@ function add3dBuildings(map: maplibregl.Map) {
       'source-layer': 'building',
       minzoom: 14,
       paint: {
-        'fill-extrusion-color': ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], 8], 0, '#16213f', 30, '#27407a', 80, '#3b5a9c'],
+        'fill-extrusion-color': ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], 8], 0, '#141b2a', 30, '#1e2c44', 80, '#2a3a55'],
         'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 8],
         'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
-        'fill-extrusion-opacity': 0.78,
+        'fill-extrusion-opacity': 0.85,
       },
     } as maplibregl.FillExtrusionLayerSpecification,
     firstSymbol,
@@ -139,7 +141,19 @@ export function MapView() {
       if (s.layers.osm !== prev.layers.osm && map.getLayer('osm-3d')) {
         map.setLayoutProperty('osm-3d', 'visibility', s.layers.osm ? 'visible' : 'none');
       }
-      if (s.selectedAlert && s.selectedAlert !== prev.selectedAlert) {
+      if (s.navRoute && s.navRoute !== prev.navRoute) {
+        const bounds = navRouteBounds(s.navRoute);
+        if (bounds) {
+          map.fitBounds(bounds, {
+            padding: { top: 90, bottom: 130, left: 60, right: 60 },
+            pitch: 48,
+            bearing: 0,
+            duration: 1200,
+            maxZoom: 17.6,
+            essential: true,
+          });
+        }
+      } else if (s.selectedAlert && s.selectedAlert !== prev.selectedAlert) {
         const a = s.alerts[s.selectedAlert];
         if (a) map.flyTo({ center: a.pos, zoom: 17.4, pitch: Math.max(map.getPitch(), 50), duration: 1400, essential: true });
       } else if (s.selectedBuilding && s.selectedBuilding !== prev.selectedBuilding) {
@@ -165,33 +179,34 @@ export function MapView() {
     setFlat(!flat);
   };
 
-  const ctl = 'btn grid h-9 w-9 place-items-center p-0';
+  const ctl = 'btn grid h-8 w-8 place-items-center p-0';
   return (
     <div className="relative h-full w-full">
       <div ref={el} className="absolute inset-0 h-full w-full" />
+      <NavOverlay />
 
-      <div className="absolute right-3 top-3 flex flex-col gap-1.5">
-        <button className={`${ctl} font-display text-[11px] font-semibold`} onClick={toggle3d} aria-label={flat ? 'Switch to 3D view' : 'Switch to 2D view'} aria-pressed={!flat}>
+      <div className="absolute right-3 top-3 flex flex-col gap-1">
+        <button className={`${ctl} text-[10.5px] font-semibold`} onClick={toggle3d} aria-label={flat ? 'Switch to 3D view' : 'Switch to 2D view'} aria-pressed={!flat}>
           {flat ? '2D' : '3D'}
         </button>
         <button className={ctl} onClick={() => mapRef.current?.zoomIn()} aria-label="Zoom in">
-          <Icon name="plus" size={16} />
+          <Icon name="plus" size={14} />
         </button>
         <button className={ctl} onClick={() => mapRef.current?.zoomOut()} aria-label="Zoom out">
-          <Icon name="minus" size={16} />
+          <Icon name="minus" size={14} />
         </button>
         <button className={ctl} onClick={() => mapRef.current?.easeTo({ ...HOME, duration: 900 })} aria-label="Reset view">
-          <Icon name="compass" size={16} />
+          <Icon name="compass" size={14} />
         </button>
         <div className="relative">
           <button className={ctl} onClick={() => setMenu(!menu)} aria-label="Map layers" aria-expanded={menu}>
-            <Icon name="layers" size={16} />
+            <Icon name="layers" size={14} />
           </button>
           {menu && (
-            <div className="panel absolute right-11 top-0 w-48 rounded-md p-2 text-[12px]">
+            <div className="panel absolute right-10 top-0 w-48 p-1.5 text-[11.5px]">
               {(Object.keys(LAYER_LABEL) as (keyof Layers)[]).map((k) => (
-                <label key={k} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 hover:bg-[#16213f]">
-                  <input type="checkbox" checked={layers[k]} onChange={() => toggleLayer(k)} className="accent-[#3db4ff]" />
+                <label key={k} className="flex cursor-pointer items-center gap-2 px-1.5 py-1 hover:bg-raise">
+                  <input type="checkbox" checked={layers[k]} onChange={() => toggleLayer(k)} className="accent-[#4d9fff]" />
                   {LAYER_LABEL[k]}
                 </label>
               ))}
@@ -200,19 +215,19 @@ export function MapView() {
         </div>
       </div>
 
-      <div className="panel pointer-events-none absolute bottom-3 left-3 hidden rounded-md px-2.5 py-2 text-[11px] text-dim lg:block">
+      <div className="panel pointer-events-none absolute bottom-3 left-3 hidden px-2.5 py-2 text-[10.5px] text-dim lg:block">
         <div className="label mb-1">Legend</div>
         {(['fire_truck', 'medical', 'evacuation'] as const).map((p) => (
           <div key={p} className="flex items-center gap-2">
-            <i className="inline-block h-[3px] w-5 rounded" style={{ background: PROFILE_META[p].color }} />
+            <i className="inline-block h-[2px] w-5" style={{ background: PROFILE_META[p].color }} />
             {PROFILE_META[p].label}
           </div>
         ))}
-        <div className="mt-1 flex items-center gap-2">
-          <i className="inline-block h-2.5 w-2.5 rounded-full bg-[#ff4d5e]/60" /> Fire danger zone
+        <div className="mt-1.5 flex items-center gap-2">
+          <i className="inline-block h-2 w-2 bg-[#e35d6a]/60" /> Fire danger zone
         </div>
-        <div className="flex items-center gap-2">
-          <i className="inline-block h-2.5 w-2.5 rounded-full bg-[#3290ff]/60" /> Flooded lane
+        <div className="mt-0.5 flex items-center gap-2">
+          <i className="inline-block h-2 w-2 bg-[#4d9fff]/60" /> Flooded lane
         </div>
       </div>
     </div>
