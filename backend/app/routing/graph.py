@@ -68,3 +68,4 @@ class Graph:
 class Ctx:
     hazards: list[dict[str, Any]] = field(default_factory=list)
     floods: list[dict[str, Any]] = field(default_factory=list)
+    closures: list[dict[str, Any]] = field(default_factory=list)

@@ -1,9 +1,17 @@
 import { create } from 'zustand';
 import type {
-  Alert, Building, FeedStatus, FloodZone, Hazard, Intervention, LaneEdge, LaneNode, ModuleId, NavOrigin, NavProfile, NavResponse, Route, SensorKind, SensorMeta, ServerMsg, Telemetry,
+  Alert, Building, FeedStatus, FloodZone, Hazard, Intervention, LaneEdge, LaneNode, ModuleId, NavClosure, NavDepartment, NavOrigin, NavOriginMode, NavProfile, NavResponse, NavStation, Route, SensorKind, SensorMeta, ServerMsg, Telemetry,
 } from './types';
 import { safetyScore } from './lib/metrics';
-import { fetchNavigation, ApiError } from './lib/api';
+import {
+  clearClosures,
+  createClosure,
+  deleteClosure,
+  fetchClosures,
+  fetchNavigation,
+  ApiError,
+  type ClosureInput,
+} from './lib/api';
 
 export interface LogLine { ts: number; text: string; hot: boolean; kind: SensorKind }
 export interface Layers { lanes: boolean; sensors: boolean; flood: boolean }
@@ -49,7 +57,14 @@ export interface StoreState {
   navErrorCode: string | null;
   navProfile: NavProfile;
   navOrigin: NavOrigin | null;
+  navDepartment: NavDepartment;
+  navOriginMode: NavOriginMode;
+  navStation: NavStation | null;
   navTargetId: string | null;
+  navClosures: NavClosure[];
+  navClosureMode: boolean;
+  navClosureError: string | null;
+  navClosureBusy: boolean;
 
   apply: (m: ServerMsg) => void;
   selectAlert: (id: string | null) => void;
@@ -60,9 +75,16 @@ export interface StoreState {
   sample: () => void;
   setNavOrigin: (o: NavOrigin | null) => void;
   setNavProfile: (p: NavProfile) => void;
+  setNavDepartment: (d: NavDepartment) => void;
+  setNavOriginMode: (m: NavOriginMode) => void;
   navigateToAlert: (id: string) => Promise<void>;
   refreshNavigation: () => Promise<void>;
   clearNavigation: () => void;
+  loadNavClosures: () => Promise<void>;
+  setNavClosureMode: (on: boolean) => void;
+  addNavClosure: (input: ClosureInput) => Promise<boolean>;
+  removeNavClosure: (id: string) => Promise<void>;
+  clearNavClosures: () => Promise<void>;
 }
 
 const fmt = (t: Telemetry): LogLine => {
@@ -101,7 +123,14 @@ export const useStore = create<StoreState>()((set, get) => ({
   navErrorCode: null,
   navProfile: 'fire_truck',
   navOrigin: null,
+  navDepartment: 'fire',
+  navOriginMode: 'nearest_station',
+  navStation: null,
   navTargetId: null,
+  navClosures: [],
+  navClosureMode: false,
+  navClosureError: null,
+  navClosureBusy: false,
 
   apply: (m) => {
     switch (m.t) {
@@ -180,12 +209,22 @@ export const useStore = create<StoreState>()((set, get) => ({
   },
 
   setNavOrigin: (navOrigin) => {
-    set({ navOrigin });
+    set({ navOrigin, navOriginMode: 'coordinates' });
     const target = get().navTargetId;
     if (target) void get().navigateToAlert(target);
   },
   setNavProfile: (navProfile) => {
     set({ navProfile });
+    const target = get().navTargetId;
+    if (target) void get().navigateToAlert(target);
+  },
+  setNavDepartment: (navDepartment) => {
+    set({ navDepartment, navOriginMode: 'nearest_station' });
+    const target = get().navTargetId;
+    if (target) void get().navigateToAlert(target);
+  },
+  setNavOriginMode: (navOriginMode) => {
+    set({ navOriginMode });
     const target = get().navTargetId;
     if (target) void get().navigateToAlert(target);
   },
@@ -195,12 +234,13 @@ export const useStore = create<StoreState>()((set, get) => ({
       set({ navStatus: 'error', navError: 'Incident is no longer available', navErrorCode: 'ALERT_NOT_FOUND' });
       return;
     }
-    const origin = defaultNavOrigin(get());
-    if (!origin) {
+    const { navOriginMode, navDepartment } = get();
+    const origin = navOriginMode === 'nearest_station' ? null : defaultNavOrigin(get());
+    if (navOriginMode === 'coordinates' && !origin) {
       set({
         navTargetId: id,
         navStatus: 'error',
-        navError: 'No responder origin available. Add a fire post or enter custom coordinates.',
+        navError: 'No responder origin available. Pick a fire post, use your live location, or enter coordinates.',
         navErrorCode: 'NO_ORIGIN',
       });
       return;
@@ -211,14 +251,24 @@ export const useStore = create<StoreState>()((set, get) => ({
     set({
       navTargetId: id,
       navOrigin: origin,
+      navStation: null,
       navStatus: 'loading',
       navError: null,
       navErrorCode: null,
     });
     try {
-      const navRoute = await fetchNavigation(origin.pos, alert.pos, get().navProfile, controller.signal);
+      const navRoute = await fetchNavigation(
+        {
+          ...(origin ? { origin: origin.pos } : {}),
+          destination: alert.pos,
+          profile: get().navProfile,
+          originMode: navOriginMode,
+          ...(navOriginMode === 'nearest_station' ? { department: navDepartment } : {}),
+        },
+        controller.signal,
+      );
       if (controller.signal.aborted) return;
-      set({ navRoute, navStatus: 'ready', navError: null, navErrorCode: null });
+      set({ navRoute, navStation: navRoute.origin_station ?? null, navStatus: 'ready', navError: null, navErrorCode: null });
     } catch (error) {
       if (controller.signal.aborted) return;
       if (error instanceof DOMException && error.name === 'AbortError') return;
@@ -244,6 +294,68 @@ export const useStore = create<StoreState>()((set, get) => ({
   clearNavigation: () => {
     navAbort?.abort();
     navAbort = null;
-    set({ navRoute: null, navStatus: 'idle', navError: null, navErrorCode: null, navTargetId: null });
+    set({
+      navRoute: null,
+      navStation: null,
+      navStatus: 'idle',
+      navError: null,
+      navErrorCode: null,
+      navTargetId: null,
+      navClosureMode: false,
+    });
+  },
+  loadNavClosures: async () => {
+    try {
+      const navClosures = await fetchClosures();
+      set({ navClosures, navClosureError: null });
+    } catch {
+      set({ navClosureError: 'Cannot load road closures from the backend.' });
+    }
+  },
+  setNavClosureMode: (navClosureMode) => set({ navClosureMode, navClosureError: null }),
+  addNavClosure: async (input) => {
+    set({ navClosureBusy: true, navClosureError: null });
+    try {
+      const closure = await createClosure(input);
+      set({
+        navClosures: [...get().navClosures, closure],
+        navClosureMode: false,
+        navClosureBusy: false,
+      });
+      const target = get().navTargetId;
+      if (target) await get().navigateToAlert(target);
+      return true;
+    } catch {
+      set({
+        navClosureBusy: false,
+        navClosureError: 'Could not add the road closure. Check the backend connection.',
+      });
+      return false;
+    }
+  },
+  removeNavClosure: async (id) => {
+    set({ navClosureBusy: true, navClosureError: null });
+    try {
+      await deleteClosure(id);
+      set({
+        navClosures: get().navClosures.filter((closure) => closure.id !== id),
+        navClosureBusy: false,
+      });
+      const target = get().navTargetId;
+      if (target) await get().navigateToAlert(target);
+    } catch {
+      set({ navClosureBusy: false, navClosureError: 'Could not remove the road closure.' });
+    }
+  },
+  clearNavClosures: async () => {
+    set({ navClosureBusy: true, navClosureError: null });
+    try {
+      await clearClosures();
+      set({ navClosures: [], navClosureBusy: false });
+      const target = get().navTargetId;
+      if (target) await get().navigateToAlert(target);
+    } catch {
+      set({ navClosureBusy: false, navClosureError: 'Could not clear road closures.' });
+    }
   },
 }));

@@ -14,11 +14,36 @@ export type FeedStatus = 'connecting' | 'live' | 'sim' | 'offline';
 
 /* ---------- real OSM navigation (backend /api/v1/routes/navigate) ---------- */
 export type NavProfile = 'fire_truck' | 'responder_bike' | 'walking';
+export type NavDepartment = 'fire' | 'medical' | 'police';
+export type NavOriginMode = 'coordinates' | 'nearest_station';
 
 export interface NavOrigin {
   id: string;
   label: string;
   pos: LonLat;
+}
+
+export interface NavStation {
+  id: string;
+  department: string;
+  name: string;
+  address: string;
+  lat: number;
+  lng: number;
+  distance_m: number;
+  source: string;
+  category?: string;
+}
+
+export interface NavClosure {
+  id: string;
+  lat: number;
+  lng: number;
+  pos: LonLat;
+  radius_m: number;
+  reason: string;
+  source: 'manual' | 'simulated';
+  active: boolean;
 }
 
 export interface NavSnap {
@@ -46,6 +71,7 @@ export interface NavRouteProperties {
   warnings: string[];
   origin_snap_distance_m: number;
   destination_snap_distance_m: number;
+  closures_considered?: number;
 }
 
 export interface NavRouteFeature {
@@ -59,6 +85,8 @@ export interface NavResponse {
   origin: NavSnap;
   destination: NavSnap;
   warnings: string[];
+  origin_station?: NavStation | null;
+  stations_considered?: number;
 }
 
 export interface Building {

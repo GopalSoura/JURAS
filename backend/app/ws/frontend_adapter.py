@@ -14,8 +14,10 @@ from app.models import Building, Lane, LaneNode, Sensor, Incident, IncidentEvent
 from app.core.constants import IncidentStatus, Hazard
 from app.repositories import building_repo, incident_repo
 from app.services import incident_service
-from app.services.routing_service import plan_routes_for_building, POSTS
-from app.routing.graph import Ctx, Graph, LaneEdgeData, LaneNodeData, dist_m_sqrt
+from app.services.navigation_service import lane_inputs
+from app.services.simulation_navigation_service import plan_osm_routes_for_building
+from app.routing.graph import Graph, LaneEdgeData, LaneNodeData, dist_m_sqrt
+from app.routing.osm_graph import build_navigation_graph
 from app.state import app_state
 
 logger = logging.getLogger("juras.ws_adapter")
@@ -62,6 +64,7 @@ class FrontendWorld:
         self.building_by_id: dict[str, str] = {}
         self.sensors: list[dict[str, Any]] = []
         self.graph: Graph | None = None
+        self.osm_graph = None
         self.alerts: dict[str, dict[str, Any]] = {}
         self.routes: dict[str, list[dict[str, Any]]] = {}
         self.hazards: dict[str, dict[str, Any]] = {}
@@ -142,11 +145,16 @@ class FrontendWorld:
                 LaneNodeData(id=n.code, pos=n.pos, label=n.label, kind=n.kind)
                 for n in nodes.scalars().all()
             ]
+            lane_rows = list(lanes.scalars().all())
             edge_data = [
                 LaneEdgeData(id=l.code, a=l.node_a_code, b=l.node_b_code, width_m=l.width_m, stairs=l.stairs)
-                for l in lanes.scalars().all()
+                for l in lane_rows
             ]
             self.graph = Graph.build(node_data, edge_data)
+            osm_lanes = [
+                lane for lane in lane_rows if (lane.attributes or {}).get("source") == "osm"
+            ]
+            self.osm_graph = build_navigation_graph(lane_inputs(osm_lanes)) if osm_lanes else None
             self.sensors = [
                 {
                     "node_id": s.code,
@@ -634,12 +642,42 @@ class FrontendWorld:
     async def _plan_fire_routes(self, alert_id: str, b: dict[str, Any], hz: dict[str, Any]) -> None:
         async with self.session_factory() as session:
             building = await building_repo.get_by_code(session, b["id"])
-            if building is None or self.graph is None:
+            if building is None:
                 return
             app_state.set_hazard(hz["id"], hz)
-            routes = await plan_routes_for_building(session, building, self.graph)
+            ctx = app_state.routing_ctx()
+            fire_post = self._post_pos("A")
+            medical_post = self._post_pos("E")
+            assemblies = [self._post_pos("G"), self._post_pos("Q")]
+            routes = plan_osm_routes_for_building(
+                self.osm_graph,
+                building_center=list(b["center"]),
+                building_name=b["name"],
+                fire_post=fire_post,
+                medical_post=medical_post,
+                assemblies=assemblies,
+                fire_label=self._post_label("A", "Fire post"),
+                medical_label=self._post_label("E", "Medical post"),
+                assembly_labels=[
+                    self._post_label("G", "Assembly G"),
+                    self._post_label("Q", "Assembly Q"),
+                ],
+                hazards=ctx["hazards"],
+                floods=ctx["floods"],
+                closures=ctx["closures"],
+            )
             self.routes[alert_id] = routes
             await self.broadcast({"t": "routes", "alert_id": alert_id, "routes": routes})
+
+    def _post_pos(self, code: str) -> list[float]:
+        if self.graph is not None and code in self.graph.nodes:
+            return list(self.graph.nodes[code].pos)
+        return list(self.buildings.get(code, {}).get("center", [74.8575, 32.7285]))
+
+    def _post_label(self, code: str, fallback: str) -> str:
+        if self.graph is not None and code in self.graph.nodes:
+            return self.graph.nodes[code].label
+        return fallback
 
     def _detect_structure(self, t: float, by: dict[str, dict[str, Any]]) -> None:
         for s in self.sensors:

@@ -29,6 +29,10 @@ class Settings:
             os.getenv("SIMULATION_MAX_DURATION_SEC", "300")
         )
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO")
+        self.mapbox_access_token: str = os.getenv("MAPBOX_ACCESS_TOKEN", "")
+        self.mapbox_station_cache_seconds: int = int(
+            os.getenv("MAPBOX_STATION_CACHE_SECONDS", "600")
+        )
         self.data_label: str = "illustrative demo data, not surveyed Purani Mandi geometry"
 
 

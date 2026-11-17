@@ -1,7 +1,7 @@
 import { PathLayer, PolygonLayer, ScatterplotLayer, TextLayer } from '@deck.gl/layers';
 import { TripsLayer } from '@deck.gl/geo-layers';
 import type { Layer, PickingInfo } from '@deck.gl/core';
-import type { Building, FloodZone, Hazard, LaneEdge, LaneNode, LonLat, Route, SensorMeta } from '../types';
+import type { Building, FloodZone, Hazard, LaneEdge, LaneNode, LonLat, NavClosure, Route, SensorMeta } from '../types';
 import type { StoreState } from '../store';
 import { CONFIG } from '../config';
 import { cumulative, distM, midpoint, pointAlong } from './geo';
@@ -139,6 +139,37 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
     );
   }
 
+  // ---- operator road closures: hard blocks, not just penalties ----
+  if (s.navClosures.length) {
+    const closures = s.navClosures.filter((c) => c.active);
+    if (closures.length) {
+      layers.push(
+        new ScatterplotLayer<NavClosure>({
+          id: 'nav-closures',
+          data: closures,
+          getPosition: (c) => c.pos,
+          getRadius: (c) => Math.max(c.radius_m, 6),
+          getFillColor: [255, 92, 92, 72],
+          stroked: true,
+          getLineColor: [255, 120, 120, 235],
+          lineWidthMinPixels: 2,
+        }),
+        new TextLayer<NavClosure>({
+          id: 'nav-closure-labels',
+          data: closures,
+          getPosition: (c) => [...c.pos, 2],
+          getText: () => 'ROAD CLOSED',
+          getSize: 9,
+          getColor: [255, 170, 170, 240],
+          fontFamily: FONT,
+          background: true,
+          getBackgroundColor: [20, 6, 8, 225],
+          backgroundPadding: [3, 1],
+        }),
+      );
+    }
+  }
+
   // ---- buildings (digital passports) ----
   layers.push(
     new PolygonLayer<Building>({
@@ -236,10 +267,11 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
 
   // ---- response routes ----
   if (routes.length) {
+    const drawable = routes.filter((r) => r.feasible && r.path.length >= 2);
     layers.push(
       new PathLayer<Route>({
         id: 'route-base',
-        data: routes,
+        data: drawable,
         getPath: (r) => r.path,
         getColor: (r) => rgba(PROFILE_META[r.profile].rgb, 80),
         getWidth: 3.5,
@@ -249,7 +281,7 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
       }),
       new PathLayer<Route>({
         id: 'route-foot',
-        data: routes.filter((r) => r.foot_path && r.last_mile_m > 8),
+        data: routes.filter((r) => r.foot_path && r.foot_path.length >= 2 && r.last_mile_m > 8),
         getPath: (r) => r.foot_path ?? [],
         getColor: (r) => rgba(PROFILE_META[r.profile].rgb, 130),
         getWidth: 2,
@@ -257,7 +289,7 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
       }),
       new TripsLayer<Route>({
         id: 'route-flow',
-        data: routes.filter((r) => r.feasible),
+        data: drawable,
         getPath: (r) => r.path,
         getTimestamps: (r) => timestamps(r),
         getColor: (r) => rgba(PROFILE_META[r.profile].rgb, 235),
@@ -274,7 +306,7 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
     if (focus?.dispatched_at && isOpen(focus)) {
       const elapsed = ((now - focus.dispatched_at) / 1000) * CONFIG.timeScale;
       const units: Unit[] = routes
-        .filter((r) => r.feasible && r.travel_s > 0)
+        .filter((r) => r.feasible && r.travel_s > 0 && r.path.length >= 2)
         .map((r) => {
           const p = Math.min(1, elapsed / r.travel_s);
           return { pos: pointAlong(r.path, p), route: r, arrived: p >= 1 };

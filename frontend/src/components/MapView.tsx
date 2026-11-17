@@ -31,6 +31,7 @@ function syncMarkers(map: mapboxgl.Map, markers: Map<string, mapboxgl.Marker>, s
   const focus = focusAlert(s.alerts, s.routes, s.selectedAlert);
   const along: Record<string, number> = { fire_truck: 0.4, medical: 0.6, evacuation: 0.5 };
   for (const r of focus ? s.routes[focus.id] ?? [] : []) {
+    if (!r.feasible || r.path.length < 2) continue;
     const m = PROFILE_META[r.profile];
     want.set(`eta-${r.profile}`, {
       pos: pointAlong(r.path, along[r.profile]),
@@ -98,16 +99,43 @@ export function MapView() {
     });
     mapRef.current = map;
     map.addControl(new mapboxgl.AttributionControl({ compact: true }));
+    const geolocate = new mapboxgl.GeolocateControl({
+      positionOptions: { enableHighAccuracy: true },
+      trackUserLocation: true,
+      showUserLocation: true,
+      showAccuracyCircle: true,
+    });
+    map.addControl(geolocate, 'top-right');
+    geolocate.on('geolocate', (event) => {
+      const coords = (event as unknown as GeolocationPosition).coords;
+      useStore.getState().setNavOrigin({
+        id: `geo:${coords.latitude.toFixed(6)},${coords.longitude.toFixed(6)}`,
+        label: 'My live location',
+        pos: [coords.longitude, coords.latitude],
+      });
+    });
 
     const overlay = new MapboxOverlay({
       interleaved: false,
       layers: [],
       getTooltip: (info) => tooltipFor(info, useStore.getState()),
       onClick: (info) => {
+        if (useStore.getState().navClosureMode) return;
         if (info.layer?.id === 'buildings' && info.object) useStore.getState().selectBuilding((info.object as { id: string }).id);
       },
     });
     map.addControl(overlay as unknown as mapboxgl.IControl);
+    map.on('click', (event) => {
+      const state = useStore.getState();
+      if (!state.navClosureMode) return;
+      void state.addNavClosure({
+        lat: event.lngLat.lat,
+        lng: event.lngLat.lng,
+        radius_m: 18,
+        reason: 'Road closed at map click',
+        source: 'manual',
+      });
+    });
     map.on('load', () => {
       for (const layer of map.getStyle().layers ?? []) {
         if (layer.type === 'fill-extrusion') map.setLayoutProperty(layer.id, 'visibility', 'none');

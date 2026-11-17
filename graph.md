@@ -106,8 +106,8 @@ ROOT â”€â”€> L0 INFRA â”€â”€> L1 CONFIG â”€â”€> L2
 | N3.4 | Routing engine | `backend/app/routing/{graph,algorithms}.py` | Dijkstra; arc filters: stairs blocked for vehicles, width â‰¥ profile min, deep-flood block; hazard multiplier; ports frontend `routing.ts` exactly |
 | N3.5 | Services | `backend/app/services/{reading,incident,gis,routing}_service.py` | ingest pipeline (readingâ†’riskâ†’incidentâ†’events list); incident transitions openâ†’acknowledgedâ†’resolved/false_alarm (resolved terminal); route planning 3 profiles |
 | N3.6 | Repositories (7) | `backend/app/repositories/*.py` | building, lane, lane_node, sensor, reading, simulation, risk, incident, incident_event; `list_buildings`/`list_lanes` accept `source` filter (`coalesce(attributes->>'source','demo')`); features carry per-feature `source` + provenance label |
-| N3.7 | Real OSM navigation graph | `backend/app/routing/osm_graph.py` | DONE - builds routable graph from `lanes.path` (`source=osm`), splits at shared OSM vertices only, honours one-way/roundabout/access/maxwidth/maxheight/stairs/blocked, weak components, 500 m snapping, snap-pair fallback, A* with time/distance weighting, full LineString geometry |
-| N3.8 | Navigation service | `backend/app/services/navigation_service.py` | DONE - loads only OSM lanes, maps DB rows to graph inputs, converts `NavigationError` to existing `AppError` contract, returns GeoJSON Feature + snaps + warnings |
+| N3.7 | Real OSM navigation graph | `backend/app/routing/osm_graph.py` | DONE - builds routable graph from `lanes.path` (`source=osm`), splits at shared OSM vertices only, honours one-way/roundabout/access/maxwidth/maxheight/stairs/blocked, weak components, 500 m snapping, best snap-pair selection (non-zero route preferred), A* with time/distance weighting, hazard/flood penalties, access/egress walking connectors, turn-by-turn RouteStep list, full LineString geometry |
+| N3.8 | Navigation service | `backend/app/services/navigation_service.py` | DONE - loads only OSM lanes, maps DB rows to graph inputs, converts `NavigationError` to existing `AppError` contract, injects live `app_state.routing_ctx()` hazard/flood data (`avoid_hazards`), returns GeoJSON Feature + snaps + connector totals + turn-by-turn steps + warnings |
 
 ### L4 â€” REST API â€” ALL `DONE`
 | ID | Node | Path | Notes |
@@ -604,3 +604,438 @@ hashes are appended below after the commits are created.
 The final docs commit (the commit that introduced this section) also adds
 `JURAS_Backend_Engineering_Blueprint.docx` as the original requirements
 reference. Use `git log -1 --stat` to see it.
+
+---
+
+## 12. 2026-11-17 - OSM pilot coverage + Google-Maps-style simulation navigation
+
+### 12.1 Root cause fixed
+
+The imported OSM bbox started at lon `74.8575`, but the demo/pilot area (Fire
+Post A, Medical Post E, assemblies G/Q, buildings such as B-014) sits at
+`74.8543-74.8607`. Navigation therefore snapped points 400-600 m onto the
+nearest boundary road, producing 0 m / tiny simulation routes. Real OSM ways
+for the pilot bbox `74.849,32.724,74.863,32.733` were fetched from the official
+OSM API map endpoint (Overpass mirrors returned 406/502/timeout), merged, and
+re-imported:
+
+- `backend/roads_lanes.geojson`: 700 features (179 new pilot ways, 57
+  overlapping ways tag-merged).
+- Import stats: `lanes_created=179`, `lanes_updated=521`, `nodes_created=287`,
+  `nodes_total=1076`; lane bbox now `74.8473731-74.9077558`,
+  `32.715585-32.7496094`.
+- Result: A -> B-014 is now ~563 m / 9 edges with 17 m and 1 m snaps, instead
+  of a degenerate snap-pair route.
+
+### 12.2 Backend changes (frontend untouched)
+
+> **Superseded 2026-11-18:** section 15 replaced the connector geometry,
+> total-distance/duration behavior, and the `None` simulation fallback described
+> below. This section remains as a historical record of the first OSM pilot.
+
+- `app/routing/osm_graph.py`
+  - `_plan_route` now evaluates up to 24 near snap pairs (sorted by access
+    distance, pruned with a lower bound), actually routes each pair, and picks
+    the best combined road + access/egress cost. A non-zero road route is
+    preferred over a zero-length snap pair. Route score includes connector
+    walking time (`1.3 m/s`) for `time` weighting.
+  - Hazards multiply edge cost x6 within `radius + 10 m`; floods block
+    `fire_truck` at `depth_cm >= 25` and otherwise multiply by `1 + depth/30`,
+    matching the legacy demo rules.
+  - `RouteResult` adds `steps`, `road_distance_m`, `road_duration_s`,
+    `access_distance_m`, `access_duration_s`, `egress_distance_m`,
+    `egress_duration_s`. Route geometry starts at the requested origin and ends
+    at the requested destination, including off-road walking connectors.
+  - Turn-by-turn `RouteStep` generation: `walk`/`depart`/`continue`/
+    `turn-left|right`/`slight-*`/`sharp-*`/`uturn`/`roundabout`/`arrive`, with
+    compass headings, OSM road names, per-step geometry, and duration.
+  - Degenerate zero-length steps no longer inflate route distance.
+- `app/services/navigation_service.py`: `load_navigation_graph()`, live
+  hazard/flood context (`avoid_hazards`, default true), connector totals and
+  step payloads in `/routes/navigate` properties.
+- `app/schemas/route.py`: `NavigateRequest.avoid_hazards`, `NavigateStep`, and
+  additive `NavigateProperties` fields (`road_*`, `access_*`, `egress_*`,
+  `steps`). Existing clients keep working.
+- `app/api/v1/endpoints/routes.py`: forwards `avoid_hazards`.
+- `app/services/simulation_navigation_service.py` (new):
+  `plan_osm_routes_for_building()` maps the legacy simulation profiles onto OSM
+  (`fire_truck` -> `fire_truck`, `medical` -> `responder_bike`, `evacuation` ->
+  `walking`), returns the unchanged WS `Route` shape (`path`, `length_m`,
+  `travel_s`, `eta_s`, `last_mile_m`, `note`, `from`, `to`) plus optional
+  `steps`, and picks the fastest reachable assembly for evacuation. Returns
+  `None` when no OSM graph exists so the caller falls back to the legacy grid.
+- `app/ws/frontend_adapter.py`: caches the OSM graph at world load and plans
+  fire/medical/evacuation routes on real roads during simulations (including
+  re-planning when flood zones change). Route `path` now includes connectors;
+  `foot_path` stays empty to avoid double drawing.
+
+### 12.3 Verification
+
+- `backend/tests/unit/test_osm_navigation.py`: 19 existing + 3 new tests
+  (turn-by-turn steps, off-road connectors in geometry/totals, hazard reroute
+  and deep-flood fire-truck block).
+- `backend/tests/integration/test_navigation_api.py`: 6 existing + 1 new test
+  (turn-by-turn steps, connector geometry, `avoid_hazards` contract).
+- `backend/tests/unit/test_simulation_navigation.py` (new): 3 tests for profile
+  mapping, legacy WS Route shape, `None` fallback, and offline-building
+  infeasibility.
+- Full backend suite: `87 passed` (`pytest -q`, ~10 s).
+- Live-data probe for B-014: fire 581 m / 86 s road time / 100 s ETA with 9
+  steps; medical 890 m / 208 s ETA with 12 steps; evacuation to Assembly Q
+  525 m / 417 s with 9 steps.
+- Frontend remains READ-ONLY: `/routes/navigate` and `/ws` payload changes are
+  additive, so no frontend edit was required or made.
+
+### 12.4 Operator commands
+
+```powershell
+# re-import the OSM dataset if the DB is reset (run from backend/)
+$env:PYTHONPATH="."; .\.venv\Scripts\python.exe scripts\import_osm_geojson.py
+# navigation + full backend tests
+$env:PYTHONPATH="."; .\.venv\Scripts\python.exe -m pytest tests/unit/test_osm_navigation.py tests/integration/test_navigation_api.py -q
+$env:PYTHONPATH="."; .\.venv\Scripts\python.exe -m pytest -q
+```
+
+---
+
+## 13. 2026-11-17 - Live location + nearest real station navigation
+
+### 13.1 Problem
+
+The navigation card always used the first demo `fire_post` lane node as the
+responder origin and never asked the browser for a live location. It also had
+no concept of dispatching the nearest fire/medical/police station, and there
+was no backend source for real map-listed stations.
+
+### 13.2 Backend changes
+
+- `app/core/config.py` + `backend/.env.example`: new `MAPBOX_ACCESS_TOKEN`
+  (same public token as `frontend/.env.local` -> `VITE_MAPBOX_ACCESS_TOKEN`)
+  and `MAPBOX_STATION_CACHE_SECONDS` (default 600). Local `backend/.env` is
+  gitignored and was populated from the existing frontend token.
+- `app/services/station_service.py` (new): queries the Mapbox Search Box
+  category API (`fire_station`, `hospital`, `police`) with the incident as
+  proximity, keeps the same POIs the Mapbox basemap displays, sorts by
+  straight-line distance, caches per rounded point for 10 minutes, and falls
+  back to the existing demo `fire_post` / `medical_post` nodes when the token
+  is missing or the API fails. `httpx` request logging is suppressed because
+  its INFO lines include the token in the query string.
+- `app/schemas/route.py`: `NavigateRequest` now accepts optional `origin`,
+  `department` (`fire|medical|police`) and `origin_mode`
+  (`coordinates|nearest_station`) with cross-field validation;
+  `NavigateStation` and `origin_station` / `stations_considered` response
+  fields are additive.
+- `app/services/navigation_service.py`: `nearest_station` mode fetches up to 8
+  Mapbox stations near the incident, routes the closest 6 on the imported OSM
+  graph with the department profile (`fire` -> `fire_truck`, `medical`/`police`
+  -> `responder_bike`), and returns the fastest reachable station. No station
+  or no reachable station produces explicit `STATION_DATA_UNAVAILABLE` /
+  `STATION_ROUTE_NOT_FOUND` errors instead of silently using a fake origin.
+- `app/api/v1/endpoints/routes.py`:
+  `GET /api/v1/routes/stations?department=&lat=&lng=&limit=` returns
+  Mapbox-listed stations nearest first.
+
+### 13.3 Frontend changes (user-approved minimal edits)
+
+The previous "frontend READ-ONLY" rule was relaxed by the user for this
+feature; only navigation-related files changed.
+
+- `src/types.ts`: `NavDepartment`, `NavOriginMode`, `NavStation`, additive
+  `NavResponse.origin_station` / `stations_considered`.
+- `src/lib/api.ts`: `fetchNavigation` now takes a request object and sends
+  `origin_mode`/`department`.
+- `src/store.ts`: `navDepartment` (default `fire`), `navOriginMode` (default
+  `nearest_station`), `navStation`; department/mode changes re-plan an active
+  route; nearest mode does not require a manual origin.
+- `src/components/NavigationCard.tsx`: "Nearest station" / "Manual origin"
+  toggle, Fire/Medical/Police department buttons, "Use my location" via
+  `navigator.geolocation`, and the chosen Mapbox station (name, address,
+  source, straight-line distance) in the result card.
+- `src/components/MapView.tsx`: Mapbox `GeolocateControl` at top-right; its
+  `geolocate` event fills the navigation origin with the live browser
+  position.
+
+### 13.4 Verification
+
+- New tests: `tests/unit/test_station_service.py` (nearest-first ordering,
+  cache, missing token, demo fallback, police has no demo fallback) and 4 new
+  integration tests (nearest-station success, missing department, unavailable
+  station data, `GET /routes/stations`).
+- Full backend suite: `96 passed`.
+- Frontend: `npm run typecheck`, `npm run nav:check`, `npm run build` passed.
+- Live Mapbox + DB probe at incident `74.8575,32.7285`:
+  - fire: chose "Fire Station" (Residency Road, 1719.7 m straight-line,
+    2603 m / 25-step OSM route);
+  - medical: chose "Government Medical College Jammu" (320 m route);
+  - police list: "Jewel Chowk-ITMS Jn" 318 m, "Nawabad Police Station" 406 m.
+- `/routes/stations` returned `source=mapbox`, `count=5` fire stations.
+
+### 13.5 Operator commands
+
+```powershell
+# backend/.env (gitignored) must contain the same public Mapbox token
+MAPBOX_ACCESS_TOKEN=pk....
+
+# from backend/
+$env:PYTHONPATH="."; .\.venv\Scripts\python.exe -m pytest -q
+$env:PYTHONPATH="."; .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+
+# from frontend/
+npm run typecheck; npm run nav:check; npm run build
+```
+
+---
+
+## 14. 2026-11-17 - Dynamic road closures + automatic alternate routes
+
+### 14.1 What was added
+
+Operators can now close a point on the road network and the router immediately
+recommends a different shortest path. Closures are hard blocks (not penalties),
+apply to every routing profile, and are shared by the HTTP navigation API, the
+nearest-station mode, simulation routes, and the legacy demo-grid planner.
+
+### 14.2 Backend changes
+
+- `app/state.py`: in-memory `closures` registry with `add_closure`,
+  `remove_closure`, `clear_closures`, `closures_snapshot`; `routing_ctx()`
+  now also returns active `closures` as `{pos, radius_m}`.
+- `app/routing/osm_graph.py`: `_edge_penalty` returns `None` when an edge is
+  within a closure radius, so the edge is removed from A* and any path using
+  it is rejected. `compute_navigation(..., closures=...)` and warnings now
+  include active closures; no other profile-specific exception.
+- `app/routing/graph.py` + `app/routing/algorithms.py`: `Ctx.closures` added
+  and the legacy demo-grid Dijkstra blocks an arc when its midpoint falls in a
+  closure radius.
+- `app/services/navigation_service.py`: both coordinate and nearest-station
+  modes pass closures and return `closures_considered`.
+- `app/services/simulation_navigation_service.py` + `app/ws/frontend_adapter.py`:
+  simulation fire/medical/evacuation routes also avoid closures.
+- `app/schemas/route.py`: `ClosureCreate` (lat/lng/radius 5-100 m/reason/
+  source), `NavigateProperties.closures_considered`.
+- `app/api/v1/endpoints/routes.py`:
+  - `GET /api/v1/routes/closures`
+  - `POST /api/v1/routes/closures` (201, returns the closure)
+  - `DELETE /api/v1/routes/closures/{id}`
+  - `DELETE /api/v1/routes/closures` (clear all)
+  Closures are intentionally in-memory (MVP): they reset when the backend
+  restarts.
+
+### 14.3 Frontend changes
+
+- `src/types.ts`: `NavClosure`, `NavRouteProperties.closures_considered`.
+- `src/lib/api.ts`: `fetchClosures`, `createClosure`, `deleteClosure`,
+  `clearClosures`.
+- `src/store.ts`: closure list/mode/error/busy state. Adding, removing, or
+  clearing a closure automatically re-plans the active route
+  (`navigateToAlert`), which is how the alternate shortest path appears.
+- `src/components/NavigationCard.tsx`: new "Road closures / obstacles" panel:
+  - "Block route ahead" drops a closure at ~55% of the current route geometry;
+  - "Pick closure on map" arms map-click placement;
+  - active closure list with individual remove and "Clear all";
+  - result banner "Re-routed around N active road closure(s)".
+- `src/components/MapView.tsx`: raw map click places a closure when armed
+  (18 m radius, reason `Road closed at map click`); building selection is
+  suppressed in that mode.
+- `src/lib/layers.ts`: deck.gl red closure circles plus "ROAD CLOSED" labels.
+
+### 14.4 Verification
+
+- `tests/unit/test_osm_navigation.py`: +2 tests. A closure on the direct road
+  forces the detour edge and a longer route; a closure with no alternative
+  raises `ROUTE_NOT_FOUND`.
+- `tests/integration/test_navigation_api.py`: +3 tests. Closure CRUD, blocked
+  route until DELETE, clear-all reopening, `closures_considered` and warning.
+- Full backend suite: `101 passed`.
+- Live DB + real Mapbox nearest-fire route: baseline 2603 m; closure of radius
+  30 m at the route midpoint produced a 2709 m / 44-edge alternate route with
+  `Route avoids 1 active road closure(s)` (detour +106 m).
+- Frontend: `npm run typecheck`, `npm run nav:check`, `npm run build` passed.
+
+### 14.5 Operator use
+
+1. Start a navigation route (nearest station or manual origin).
+2. Click "Block route ahead", or arm "Pick closure on map" and click the map.
+3. The backend blacklists affected OSM edges and returns the next fastest
+   shortest path; the card shows the new distance/ETA and detour count.
+4. Remove a closure or "Clear all" to restore the original route.
+
+```powershell
+# add / list / delete a closure manually (from backend/)
+curl.exe -X POST http://localhost:8000/api/v1/routes/closures -H "Content-Type: application/json" -d '{\"lat\":32.7335,\"lng\":74.8636,\"radius_m\":20,\"reason\":\"road work\"}'
+curl.exe http://localhost:8000/api/v1/routes/closures
+curl.exe -X DELETE http://localhost:8000/api/v1/routes/closures/closure-1
+```
+
+---
+
+## 15. 2026-11-18 - Road-only navigation geometry + honest no-route simulation
+
+### 15.1 Problem
+
+The OSM router still appended synthetic off-road connectors from the requested
+origin/destination to the snapped road points, counted them in route distance
+and delay, and emitted `walk` steps. Simulation payloads could still fall back
+to the synthetic demo grid or fabricate a straight `[origin, destination]` path
+when a profile had no route. That made the map look connected where OSM has no
+road.
+
+### 15.2 Backend changes
+
+- `app/routing/osm_graph.py`
+  - Route geometry is now road-only: snapped origin point + OSM edge geometry +
+    snapped destination point. Requested off-road points and walk connectors are
+    never included.
+  - `distance_m` / `duration_s` now equal `road_distance_m` /
+    `road_duration_s`; access and egress gaps remain reported separately in
+    `access_*` / `egress_*` fields and warnings.
+  - `validate_route_geometry(geometry, edges, tolerance_m=1.0)` checks every
+    vertex and segment midpoint against the route edges; violations raise
+    `ROUTE_GEOMETRY_INVALID` (HTTP 500) instead of drawing suspect geometry.
+  - `_plan_route` prefers snap pairs whose access/egress gaps are within 25 m of
+    the closest available snap (`PAIR_SNAP_WINDOW_M`), so a shorter road detour
+    no longer wins by ending 100+ m away from the destination. Far-pair
+    evaluation remains as fallback when no near pair is routable. Regression:
+    the evacuation test initially ended at the junction 110 m short of the
+    assembly because walking time made a farther snap pair look 3 s faster.
+  - A pair that snaps both endpoints to the same point now reports
+    `ROUTE_NOT_FOUND` ("same point ... no road segment to travel") instead of
+    returning a zero-length success. Disconnected or profile-blocked pairs keep
+    explicit messages mentioning one-way/access tags or disconnected OSM
+    components.
+  - `compute_navigation(..., max_snap_distance_m=...)` allows tests/callers to
+    tighten the snap radius; turn-by-turn steps contain no `walk` maneuvers.
+- `app/services/simulation_navigation_service.py`
+  - Infeasible routes now use `path: []` (never a fabricated two-point line).
+  - Without an OSM graph, `plan_osm_routes_for_building` returns all three
+    profiles as infeasible with empty paths and the note
+    "No OSM road graph is loaded; no simulation route can be drawn."
+  - Feasible payloads carry road-only paths, zero `last_mile_m`, no foot path,
+    and endpoint snap-gap notes; `from`/`to` labels are preserved.
+- `app/ws/frontend_adapter.py`: removed the demo-grid planner fallback and the
+  early `graph is None` return; simulation routes always come from the imported
+  OSM graph.
+
+### 15.3 Frontend changes (user-approved; Mapbox/OSM kept)
+
+- `src/lib/layers.ts`: route casing, flow, and responder units draw only
+  `feasible` routes with at least two coordinates. The existing local simulator
+  `foot_path` rendering is preserved.
+- `src/components/MapView.tsx`: no ETA chip is created for an infeasible/empty
+  route (previously it could show "< 1 min" at the fallback origin).
+- `src/components/cards.tsx`: infeasible simulation routes show "No route" plus
+  the backend note, and no progress bar; feasible routes are unchanged.
+- `src/components/NavigationCard.tsx`: snap/road-only warnings are prioritised
+  and an explicit "Road-only route / start/end snapped N m off-road / connectors
+  are not drawn" notice appears when a snap gap exceeds 5 m.
+- Mapbox basemap, Mapbox station lookup, Geolocate control, OSM lane rendering,
+  and the local demo simulator were left intact.
+
+### 15.4 Tests and verification
+
+- `tests/unit/test_osm_navigation.py`
+  - `test_offroad_connectors_are_excluded_from_geometry_and_totals`: geometry
+    starts/ends at snapped road points, no `walk` steps, totals equal road
+    totals, geometry validates against OSM edges.
+  - `test_route_geometry_validation_flags_offroad_connector`: an off-road point
+    is reported as "off the OSM road network".
+  - `test_near_but_disconnected_roads_are_not_joined`: nearby but topologically
+    separate OSM ways raise `ROUTE_NOT_FOUND` (404).
+  - `test_zero_length_snap_pair_reports_no_route`: same-point snap pair returns
+    "same point ... no road segment to travel" (404).
+  - `test_narrow_lane_blocks_fire_truck_but_not_bike_or_walking`: 2 m service
+    lane rejects `fire_truck` but allows `responder_bike`/`walking`.
+  - Existing hazard reroute, deep-flood block, and operator-closure tests still
+    pass.
+- `tests/integration/test_navigation_api.py`:
+  `test_navigate_returns_road_only_turn_by_turn_steps` asserts snapped
+  start/end, no walk steps, road-only distance, and the road-only warning.
+- `tests/unit/test_simulation_navigation.py`:
+  `test_plan_osm_routes_returns_empty_paths_without_osm_graph` and
+  `test_plan_osm_routes_reports_infeasible_profile_without_fabricated_path`
+  assert empty paths, infeasible flags, preserved labels, and no demo fallback;
+  the profile-mapping test asserts evacuation ends at the assembly snap point.
+- Full backend suite: `105 passed` (`pytest -q`).
+- Real local PostGIS probe (1,375 OSM edges, 1,109 nodes, 9 components), Fire
+  Post A -> B-014 with `fire_truck`: 543.3 m / 81.0 s, 9 edges, 22 road-only
+  coordinates, 25.8 m start snap, 1.0 m end snap, zero geometry violations.
+  Simulation payloads: fire 22 coords / 543 m, medical 52 / 882 m, evacuation
+  37 / 768 m, all geometry-valid with no foot path.
+- Frontend: `npm run typecheck`, `npm run nav:check`, `npm run sim:check`, and
+  `npm run build` passed.
+
+### 15.5 Behaviour and contracts
+
+- `POST /api/v1/routes/navigate`
+  - `route.geometry.coordinates` is a LineString of imported OSM road vertices
+    only. It starts at the snapped origin and ends at the snapped destination;
+    requested off-road points and connector segments are not present.
+  - `origin` / `destination` still echo the requested `lat`/`lng`, add the
+    `snapped` road point, and report `snap_distance_m`. These gaps are also
+    reported in `origin_snap_distance_m` / `destination_snap_distance_m`,
+    `access_*` / `egress_*`, and warnings.
+  - `distance_m` and `duration_s` equal `road_distance_m` /
+    `road_duration_s`. They do not include off-road walking time.
+  - `steps` contains no `walk` maneuvers; the last step arrives at the snapped
+    destination road point.
+  - `ROUTE_GEOMETRY_INVALID` is HTTP 500 if any route vertex/segment midpoint is
+    more than 1 m from the route edges. `ROUTE_NOT_FOUND` is HTTP 404 for
+    same-point snaps, disconnected components, or no traversable pair.
+    Endpoint snap failures remain HTTP 422 (`ORIGIN_OUT_OF_NETWORK` /
+    `DESTINATION_OUT_OF_NETWORK`).
+- Simulation WS `routes` messages keep the legacy shape
+  (`profile`, `path`, `foot_path`, `length_m`, `travel_s`, `eta_s`, `feasible`,
+  `last_mile_m`, `note`, `from`, `to`, optional `steps`).
+  - Feasible: `path` is road-only, `foot_path=[]`, `last_mile_m=0`,
+    `travel_s=eta_s=road_duration_s`.
+  - Infeasible: `path=[]`, `foot_path=[]`, `length_m=travel_s=eta_s=0`,
+    `feasible=false`, `steps=[]`, with a profile-specific note.
+  - Missing/empty graph: three infeasible payloads (fire, medical, evacuation)
+    with the note "No OSM road graph is loaded; no simulation route can be
+    drawn."
+- Frontend consumes `path=[]` safely and never draws a fake line, chip, or
+  progress bar for an infeasible simulation route. The HTTP navigation route
+  markers use the snapped line endpoints.
+
+### 15.6 Files changed for this pass
+
+- Backend:
+  - `backend/app/routing/osm_graph.py`
+  - `backend/app/services/simulation_navigation_service.py`
+  - `backend/app/ws/frontend_adapter.py`
+  - `backend/tests/unit/test_osm_navigation.py`
+  - `backend/tests/integration/test_navigation_api.py`
+  - `backend/tests/unit/test_simulation_navigation.py`
+- Frontend:
+  - `frontend/src/lib/layers.ts`
+  - `frontend/src/components/MapView.tsx`
+  - `frontend/src/components/cards.tsx`
+  - `frontend/src/components/NavigationCard.tsx`
+- Docs:
+  - `graph.md`
+
+### 15.7 Intentionally unchanged
+
+- Mapbox basemap and token, `GeolocateControl`, live-location origin, and the
+  Mapbox Search Box station lookup (`station_service.py`).
+- OSM import pipeline and `roads_lanes.geojson` data (not modified in this
+  pass), OSM lane rendering, and the OSM graph cache at world load.
+- Hazard, flood, closure, and evacuation assembly-selection behavior.
+- The legacy `POST /api/v1/routes` demo-grid planner and the local frontend
+  `SimFeed` demo simulator, including its `foot_path` rendering. Only the
+  WS simulation adapter stopped using the demo-grid fallback.
+- Existing REST/WS payload shapes; all changes are additive or fill existing
+  fields.
+
+### 15.8 Operator checks
+
+```powershell
+# from backend/
+$env:PYTHONPATH="."; .\.venv\Scripts\python.exe -m pytest -q
+
+# from frontend/
+npm run typecheck
+npm run nav:check
+npm run sim:check
+npm run build
+```

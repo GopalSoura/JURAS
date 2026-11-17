@@ -12,9 +12,12 @@ from app.routing.osm_graph import (
     DURATION_BASIS,
     NavigationError,
     OsmWayInput,
+    RouteStep,
     build_navigation_graph,
     compute_navigation,
 )
+from app.services import station_service
+from app.state import app_state
 
 
 def _osm_tags(lane: Any) -> dict[str, Any]:
@@ -54,6 +57,27 @@ def lane_inputs(lanes: list[Any]) -> list[OsmWayInput]:
     return inputs
 
 
+async def load_navigation_graph(session: AsyncSession):
+    """Build the OSM navigation graph once per caller (WS world load, API)."""
+    lanes = await lane_repo.list_lanes(session, source="osm")
+    return build_navigation_graph(lane_inputs(lanes))
+
+
+def _step_payload(step: RouteStep) -> dict[str, Any]:
+    return {
+        "maneuver": step.maneuver,
+        "instruction": step.instruction,
+        "road_name": step.road_name,
+        "highway": step.highway,
+        "mode": step.mode,
+        "distance_m": round(float(step.distance_m), 1),
+        "duration_s": round(float(step.duration_s), 1),
+        "start": step.start,
+        "end": step.end,
+        "geometry": step.geometry,
+    }
+
+
 def _snap_payload(candidate: Any, requested_lat: float, requested_lng: float) -> dict[str, Any]:
     return {
         "lat": requested_lat,
@@ -71,37 +95,139 @@ def _snap_payload(candidate: Any, requested_lat: float, requested_lng: float) ->
     }
 
 
+def _raise_navigation_error(exc: NavigationError) -> None:
+    if exc.code == "OSM_GRAPH_EMPTY":
+        raise AppError(
+            exc.code,
+            "No OSM road network is imported. Run backend/scripts/import_osm_geojson.py first.",
+            exc.status_code,
+        ) from exc
+    raise AppError(exc.code, exc.message, exc.status_code) from exc
+
+
+async def _route_from_station(
+    session: AsyncSession,
+    graph: Any,
+    *,
+    department: str,
+    destination_lat: float,
+    destination_lng: float,
+    weighting: str,
+    ctx: dict[str, list[dict[str, Any]]],
+) -> tuple[Any, dict[str, Any], int]:
+    nodes = await lane_repo.list_nodes(session)
+    stations = await station_service.nearest_stations(
+        department,
+        destination_lat,
+        destination_lng,
+        limit=8,
+        fallback_nodes=nodes,
+    )
+    if not stations:
+        raise AppError(
+            "STATION_DATA_UNAVAILABLE",
+            "No Mapbox-listed emergency station was found near the incident. "
+            "Set MAPBOX_ACCESS_TOKEN on the backend or provide an origin manually.",
+            422,
+        )
+
+    route_profile = station_service.DEPARTMENT_PROFILE[department]
+    best: tuple[float, Any, dict[str, Any]] | None = None
+    errors: list[str] = []
+    considered = 0
+    for station in stations[:6]:
+        considered += 1
+        try:
+            result = compute_navigation(
+                graph,
+                float(station["lat"]),
+                float(station["lng"]),
+                destination_lat,
+                destination_lng,
+                route_profile,
+                weighting,
+                hazards=ctx["hazards"],
+                floods=ctx["floods"],
+                closures=ctx["closures"],
+            )
+        except NavigationError as exc:
+            errors.append(f"{station['name']}: {exc.message}")
+            continue
+        score = (result.duration_s or 0.0) if weighting == "time" else result.distance_m
+        if best is None or score < best[0]:
+            best = (score, result, station)
+
+    if best is None:
+        detail = "; ".join(errors[:3]) if errors else "no traversable OSM route"
+        raise AppError(
+            "STATION_ROUTE_NOT_FOUND",
+            f"Mapbox returned {len(stations)} {department} station(s) but none can reach the incident "
+            f"on the imported OSM road network ({detail}).",
+            404,
+        )
+    _score, result, station = best
+    result.warnings.append(
+        f"Origin station auto-selected from Mapbox-listed {department} stations "
+        f"({station['name']}, {station['distance_m']:.0f} m straight-line from the incident)."
+    )
+    return result, station, considered
+
+
 async def navigate(
     session: AsyncSession,
     *,
-    origin_lat: float,
-    origin_lng: float,
     destination_lat: float,
     destination_lng: float,
-    profile: str,
+    origin_lat: float | None = None,
+    origin_lng: float | None = None,
+    profile: str = "fire_truck",
     weighting: str = "time",
+    avoid_hazards: bool = True,
+    department: str | None = None,
+    origin_mode: str = "coordinates",
 ) -> dict[str, Any]:
     """Plan a route on imported OSM geometry only (never the demo grid)."""
-    lanes = await lane_repo.list_lanes(session, source="osm")
-    graph = build_navigation_graph(lane_inputs(lanes))
-    try:
-        result = compute_navigation(
+    ctx = (
+        app_state.routing_ctx()
+        if avoid_hazards
+        else {"hazards": [], "floods": [], "closures": []}
+    )
+    graph = await load_navigation_graph(session)
+    chosen_station: dict[str, Any] | None = None
+    stations_considered = 0
+
+    if origin_mode == "nearest_station":
+        if department is None:
+            raise AppError("DEPARTMENT_REQUIRED", "department is required for nearest-station routing", 422)
+        result, chosen_station, stations_considered = await _route_from_station(
+            session,
             graph,
-            origin_lat,
-            origin_lng,
-            destination_lat,
-            destination_lng,
-            profile,
-            weighting,
+            department=department,
+            destination_lat=destination_lat,
+            destination_lng=destination_lng,
+            weighting=weighting,
+            ctx=ctx,
         )
-    except NavigationError as exc:
-        if exc.code == "OSM_GRAPH_EMPTY":
-            raise AppError(
-                exc.code,
-                "No OSM road network is imported. Run backend/scripts/import_osm_geojson.py first.",
-                exc.status_code,
-            ) from exc
-        raise AppError(exc.code, exc.message, exc.status_code) from exc
+        origin_lat = float(chosen_station["lat"])
+        origin_lng = float(chosen_station["lng"])
+    else:
+        if origin_lat is None or origin_lng is None:
+            raise AppError("ORIGIN_REQUIRED", "origin is required for coordinate routing", 422)
+        try:
+            result = compute_navigation(
+                graph,
+                origin_lat,
+                origin_lng,
+                destination_lat,
+                destination_lng,
+                profile,
+                weighting,
+                hazards=ctx["hazards"],
+                floods=ctx["floods"],
+                closures=ctx["closures"],
+            )
+        except NavigationError as exc:
+            _raise_navigation_error(exc)
 
     properties = {
         "distance_m": int(round(result.distance_m)),
@@ -116,7 +242,16 @@ async def navigate(
         "warnings": result.warnings,
         "origin_snap_distance_m": round(result.origin.distance_m, 1),
         "destination_snap_distance_m": round(result.destination.distance_m, 1),
+        "road_distance_m": int(round(result.road_distance_m)),
+        "road_duration_s": int(round(result.road_duration_s)),
+        "access_distance_m": round(result.access_distance_m, 1),
+        "access_duration_s": round(result.access_duration_s, 1),
+        "egress_distance_m": round(result.egress_distance_m, 1),
+        "egress_duration_s": round(result.egress_duration_s, 1),
+        "closures_considered": len(ctx["closures"]),
+        "steps": [_step_payload(step) for step in result.steps],
     }
+    assert origin_lat is not None and origin_lng is not None
     return {
         "route": {
             "type": "Feature",
@@ -129,4 +264,6 @@ async def navigate(
         "origin": _snap_payload(result.origin, origin_lat, origin_lng),
         "destination": _snap_payload(result.destination, destination_lat, destination_lng),
         "warnings": result.warnings,
+        "origin_station": chosen_station,
+        "stations_considered": stations_considered,
     }

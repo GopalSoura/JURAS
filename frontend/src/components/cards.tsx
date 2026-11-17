@@ -81,7 +81,8 @@ export function RoutesCard() {
         <ul className="space-y-1.5">
           {rs.map((r) => {
             const m = PROFILE_META[r.profile];
-            const progress = focus.dispatched_at ? Math.min(1, (((now - focus.dispatched_at) / 1000) * CONFIG.timeScale) / Math.max(1, r.travel_s)) : 0;
+            const drawable = r.feasible && r.path.length >= 2;
+            const progress = focus.dispatched_at && drawable ? Math.min(1, (((now - focus.dispatched_at) / 1000) * CONFIG.timeScale) / Math.max(1, r.travel_s)) : 0;
             return (
               <li key={r.profile} className="border border-line bg-panel px-2 py-1.5">
                 <div className="flex items-center gap-2">
@@ -89,15 +90,21 @@ export function RoutesCard() {
                     {m.glyph}
                   </span>
                   <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">{m.label}</span>
-                  <span className="num font-mono text-[13px] font-medium" style={{ color: m.color }}>
-                    {fmtEta(r.eta_s)}
+                  <span className={`num font-mono text-[13px] font-medium${drawable ? '' : ' text-crit'}`} style={drawable ? { color: m.color } : undefined}>
+                    {drawable ? fmtEta(r.eta_s) : 'No route'}
                   </span>
                 </div>
                 <div className="mt-1 text-[10.5px] leading-snug text-dim">
-                  {fmtDist(r.length_m)}
-                  {r.last_mile_m > 8 && r.profile !== 'evacuation' ? ` + ${r.last_mile_m} m on foot` : ''} · {r.note}
+                  {drawable ? (
+                    <>
+                      {fmtDist(r.length_m)}
+                      {r.last_mile_m > 8 && r.profile !== 'evacuation' ? ` + ${r.last_mile_m} m on foot` : ''} · {r.note}
+                    </>
+                  ) : (
+                    <span className="text-crit">{r.note}</span>
+                  )}
                 </div>
-                {focus.dispatched_at && (
+                {focus.dispatched_at && drawable && (
                   <div className="mt-1.5 h-[2px] w-full" style={{ background: 'var(--raise)' }} aria-hidden="true">
                     <div className="h-full" style={{ width: `${progress * 100}%`, background: m.color }} />
                   </div>

@@ -30,6 +30,9 @@ def arc_cost(g: Graph, profile: str, arc: Arc, from_node: str, ctx: Ctx) -> floa
     b_pos = g.nodes[arc.to].pos
     mid = midpoint(a_pos, b_pos)
     mult = 1.0
+    for c in ctx.closures:
+        if dist_m_sqrt(mid, c["pos"]) <= c.get("radius_m", 15.0):
+            return None
     for h in ctx.hazards:
         if dist_m_sqrt(mid, h["pos"]) <= h["radius_m"] + 10:
             mult *= 6
