@@ -1039,3 +1039,120 @@ npm run nav:check
 npm run sim:check
 npm run build
 ```
+
+---
+
+## 16. 2026-11-18 - Operator-facing navigation result card (metadata hidden)
+
+### 16.1 Problem
+
+The navigation result card exposed routing-engine internals to operators:
+`<profile> · 57 OSM segments · osm_highway_class_speed_table_no_live_traffic`,
+`(mapbox, 1646 m from incident)`, and four backend provenance warnings
+("route follows imported OSM geometry, not the synthetic demo grid", "geometry
+is road-only; off-road gaps...", "turn-by-turn instructions are derived from
+OSM way geometry", ...). None of this helps an operator decide where the truck
+drives.
+
+### 16.2 Frontend changes (presentation only; API contract untouched)
+
+- `src/components/NavigationCard.tsx`
+  - Result meta line now shows only the profile label (e.g. "Fire tender").
+    `edge_count`, `duration_basis`, algorithm and geometry provenance are no
+    longer rendered.
+  - Backend `warnings[]` is no longer dumped verbatim. Only operational
+    conditions are surfaced, in plain language: active fire hazard zones and
+    waterlogged roads. Technical provenance strings are filtered out.
+  - Snap notice rewritten from "Road-only route. Start snapped 19 m off-road...
+    connectors are not drawn" to "Route stays on mapped roads. Nearest road is
+    X m from the start; Y m from the incident."
+  - Station line drops the provider tag and raw metres: "Station: <name> ·
+    <address> — 1.6 km from incident".
+  - Station hint text no longer says "Mapbox-listed"; section hint changed from
+    "OSM road network · A*" to "Fastest road route".
+  - Error box shows the human-readable message only (no raw error code line).
+- `src/components/NavOverlay.tsx`
+  - Removed the "{n} OSM segments" chip, the raw error code prefix, and the
+    "on the OSM network" wording from the computing state.
+
+### 16.3 Intentionally unchanged
+
+- `POST /api/v1/routes/navigate` payloads, all warning strings, `edge_count`,
+  `duration_basis`, `geometry_source`, snap metadata and turn-by-turn `steps`
+  (still available to any client that wants them).
+- Mapbox basemap, station lookup, geolocation, closures, hazards, layers,
+  simulation routing, and the local demo simulator.
+
+### 16.4 Verification
+
+- `npm run typecheck` PASS.
+- `npm run nav:check` -> `ALL NAV CHECKS PASSED`.
+- `npm run build` PASS (same non-blocking zod/Rollup and chunk-size warnings).
+- Files changed: `frontend/src/components/NavigationCard.tsx`,
+  `frontend/src/components/NavOverlay.tsx`, `graph.md`.
+
+---
+
+## 17. 2026-11-18 - WebSocket disconnect noise fixed (`WebSocketDisconnected`)
+
+### 17.1 Symptom
+
+Uvicorn logged an ERROR with traceback on `/ws` when a browser tab reconnected
+or closed:
+
+```
+File "app/ws/ws_routes.py", line 34, in ws_frontend
+    raw = await websocket.receive_text()
+starlette.websockets.WebSocketDisconnected: WebSocket is not connected. Need to call "accept" first.
+```
+
+### 17.2 Root cause
+
+Starlette's `WebSocketDisconnected` is a `RuntimeError`, **not** a subclass of
+`WebSocketDisconnect`. When a client disappears mid-connection:
+
+1. Starlette's `send()` marks the socket `application_state=DISCONNECTED` and
+   raises `WebSocketDisconnect(1006)`.
+2. `FrontendWorld.send_raw` / `broadcast` swallowed that error and removed the
+   socket, but the route's receive loop kept running.
+3. The next `receive_text()` therefore raised `WebSocketDisconnected`, which
+   fell through `except WebSocketDisconnect` into the generic
+   `logger.exception("ws error")`.
+
+The client behaved correctly in every case; only the logging was wrong. Rapid
+reconnects are normal in dev (page reload, Vite HMR, the feed's 3 s retry).
+
+### 17.3 Fix
+
+- `app/ws/ws_routes.py`
+  - Catch `(WebSocketDisconnect, WebSocketDisconnected)` as a normal disconnect
+    for both `/ws` and `/ws/live`; no traceback for clients going away.
+  - `world.connect()` now returns `bool`; the route exits immediately when the
+    initial snapshot could not be delivered.
+  - Cleanup moved to `finally` (`world.disconnect` / `bus.disconnect`), so a
+    socket is never left registered after any exit path.
+  - Unexpected exceptions still log via `logger.exception`; `/ws/live` now does
+    the same instead of silently swallowing real errors.
+- `app/ws/frontend_adapter.py`
+  - `connect()` returns `False` when the snapshot send fails and only registers
+    the socket in `ui_connections` **after** a successful snapshot, so early
+    disconnects never enter the broadcast fan-out.
+  - `send_raw()` returns `bool` success and unregisters on failure.
+
+No payload, contract, or behaviour change for healthy clients.
+
+### 17.4 Verification
+
+- Live server on port 8001 + client that aborts the TCP transport at 0.02 s,
+  0.05 s, 0.1 s, 0.2 s, 0.4 s and 0.6 s after connecting (8 abrupt disconnects,
+  including during the initial snapshot write): server log shows only
+  `connection open` lines, **zero** `ws error`, zero tracebacks.
+- Healthy client still receives the full `snapshot` and can send a command.
+- Backend unit suite: `76 passed`. Integration tests were not runnable at the
+  time because `tests/conftest.py` targets the local `juras_test` database and
+  local PostgreSQL `:5432` was not running (`backend/.env` currently points at
+  Supabase, so this does not affect the running app).
+- Files changed: `backend/app/ws/ws_routes.py`,
+  `backend/app/ws/frontend_adapter.py`, `graph.md`.
+
+
