@@ -1,6 +1,6 @@
 # Old Jammu Risk Intelligence: frontend
 
-React + Vite + TypeScript + Tailwind, MapLibre GL + deck.gl (3D map), OpenStreetMap buildings, Apache ECharts.
+React + Vite + TypeScript + Tailwind, Mapbox GL + deck.gl (flat Jammu map), Apache ECharts.
 
 ```bash
 npm install
@@ -8,6 +8,8 @@ npm run dev          # http://localhost:5173, runs on the built-in hardware simu
 npm run sim:check    # headless test of simulator, fusion and routing
 npm run build
 ```
+
+Set `VITE_MAPBOX_ACCESS_TOKEN` in `frontend/.env.local` before starting Vite. The map uses Mapbox Streets and is centered on Jammu city.
 
 ## Simulator vs backend
 
@@ -60,7 +62,7 @@ async def ws(sock: WebSocket):
 ## Replacing the demo data
 
 * `src/lib/seed.ts` holds the 14 buildings, the lane graph and the sensor list. Coordinates sit on a local metre grid around Old Jammu and are not surveyed, so they will not line up with real OSM roads. In production, send these in the `snapshot` from PostGIS (JMC GIS, OSM-derived road graph with measured lane widths).
-* The grey 3D blocks come from the basemap's OSM vector tiles. Toggle them in the layers menu.
+* The map is restricted to the Jammu urban area. Simulator buildings and road networks are illustrative Old Jammu demo data, not surveyed GIS data.
 * Routing (`src/lib/routing.ts`) is a reference implementation of the responder rules: tender min lane width 3.5 m and no stairs, medical team 1.2 m and no stairs, pedestrians 0.9 m with stairs. Port the same rules to the backend (pgRouting or NetworkX).
 
 ## Layout

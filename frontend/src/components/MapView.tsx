@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import maplibregl from 'maplibre-gl';
-import 'maplibre-gl/dist/maplibre-gl.css';
+import mapboxgl from 'mapbox-gl';
+import 'mapbox-gl/dist/mapbox-gl.css';
 import { MapboxOverlay } from '@deck.gl/mapbox';
 import { useStore, type Layers, type StoreState } from '../store';
 import { CONFIG } from '../config';
@@ -13,36 +13,11 @@ import type { LonLat } from '../types';
 import { FLAME_SVG, Icon } from './icons';
 import { NavOverlay } from './NavOverlay';
 
-const HOME = { center: CONFIG.center, zoom: 16.6, pitch: 58, bearing: -24 };
-
-/** Extrude the OpenStreetMap building footprints that the basemap's vector tiles already carry. */
-function add3dBuildings(map: maplibregl.Map) {
-  const style = map.getStyle();
-  if (!style || map.getLayer('osm-3d')) return;
-  const source = Object.entries(style.sources).find(([, s]) => s.type === 'vector')?.[0];
-  if (!source) return;
-  const firstSymbol = style.layers.find((l) => l.type === 'symbol')?.id;
-  map.addLayer(
-    {
-      id: 'osm-3d',
-      type: 'fill-extrusion',
-      source,
-      'source-layer': 'building',
-      minzoom: 14,
-      paint: {
-        'fill-extrusion-color': ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], 8], 0, '#141b2a', 30, '#1e2c44', 80, '#2a3a55'],
-        'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 8],
-        'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
-        'fill-extrusion-opacity': 0.85,
-      },
-    } as maplibregl.FillExtrusionLayerSpecification,
-    firstSymbol,
-  );
-}
+const HOME = { center: CONFIG.center, zoom: 13.2, pitch: 0, bearing: 0 };
 
 interface Want { pos: LonLat; cls: string; html: string; anchor: 'bottom' | 'center' }
 
-function syncMarkers(map: maplibregl.Map, markers: Map<string, maplibregl.Marker>, s: StoreState) {
+function syncMarkers(map: mapboxgl.Map, markers: Map<string, mapboxgl.Marker>, s: StoreState) {
   const want = new Map<string, Want>();
   for (const a of Object.values(s.alerts)) {
     if (a.module !== 'fire' || !isOpen(a)) continue;
@@ -74,7 +49,7 @@ function syncMarkers(map: maplibregl.Map, markers: Map<string, maplibregl.Marker
   for (const [k, w] of want) {
     let mk = markers.get(k);
     if (!mk) {
-      mk = new maplibregl.Marker({ element: document.createElement('div'), anchor: w.anchor }).setLngLat(w.pos).addTo(map);
+      mk = new mapboxgl.Marker({ element: document.createElement('div'), anchor: w.anchor }).setLngLat(w.pos).addTo(map);
       markers.set(k, mk);
     }
     const el = mk.getElement();
@@ -88,7 +63,6 @@ function syncMarkers(map: maplibregl.Map, markers: Map<string, maplibregl.Marker
 }
 
 const LAYER_LABEL: Record<keyof Layers, string> = {
-  osm: 'OSM buildings (3D)',
   lanes: 'Lane network',
   sensors: 'Sensor nodes',
   flood: 'Flood zones',
@@ -96,25 +70,34 @@ const LAYER_LABEL: Record<keyof Layers, string> = {
 
 export function MapView() {
   const el = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<maplibregl.Map | null>(null);
-  const [flat, setFlat] = useState(false);
+  const mapRef = useRef<mapboxgl.Map | null>(null);
   const [menu, setMenu] = useState(false);
+  const [mapError, setMapError] = useState<string | null>(null);
   const layers = useStore((s) => s.layers);
   const toggleLayer = useStore((s) => s.toggleLayer);
 
   useEffect(() => {
     if (!el.current) return;
-    const map = new maplibregl.Map({
+    if (!CONFIG.mapboxAccessToken) {
+      setMapError('Add VITE_MAPBOX_ACCESS_TOKEN to frontend/.env.local, then restart the frontend.');
+      return;
+    }
+
+    mapboxgl.accessToken = CONFIG.mapboxAccessToken;
+    const map = new mapboxgl.Map({
       container: el.current,
       style: CONFIG.mapStyle,
       center: HOME.center,
       zoom: HOME.zoom,
       pitch: HOME.pitch,
       bearing: HOME.bearing,
-      maxPitch: 80,
-      attributionControl: { compact: true },
+      minZoom: 11,
+      maxPitch: 0,
+      maxBounds: CONFIG.mapBounds,
+      attributionControl: false,
     });
     mapRef.current = map;
+    map.addControl(new mapboxgl.AttributionControl({ compact: true }));
 
     const overlay = new MapboxOverlay({
       interleaved: false,
@@ -124,10 +107,14 @@ export function MapView() {
         if (info.layer?.id === 'buildings' && info.object) useStore.getState().selectBuilding((info.object as { id: string }).id);
       },
     });
-    map.addControl(overlay as unknown as maplibregl.IControl);
-    map.on('load', () => add3dBuildings(map));
+    map.addControl(overlay as unknown as mapboxgl.IControl);
+    map.on('load', () => {
+      for (const layer of map.getStyle().layers ?? []) {
+        if (layer.type === 'fill-extrusion') map.setLayoutProperty(layer.id, 'visibility', 'none');
+      }
+    });
 
-    const markers = new Map<string, maplibregl.Marker>();
+    const markers = new Map<string, mapboxgl.Marker>();
     const t0 = performance.now();
     let raf = 0;
     const loop = () => {
@@ -138,15 +125,12 @@ export function MapView() {
 
     const unsub = useStore.subscribe((s, prev) => {
       syncMarkers(map, markers, s);
-      if (s.layers.osm !== prev.layers.osm && map.getLayer('osm-3d')) {
-        map.setLayoutProperty('osm-3d', 'visibility', s.layers.osm ? 'visible' : 'none');
-      }
       if (s.navRoute && s.navRoute !== prev.navRoute) {
         const bounds = navRouteBounds(s.navRoute);
         if (bounds) {
           map.fitBounds(bounds, {
             padding: { top: 90, bottom: 130, left: 60, right: 60 },
-            pitch: 48,
+            pitch: 0,
             bearing: 0,
             duration: 1200,
             maxZoom: 17.6,
@@ -155,7 +139,7 @@ export function MapView() {
         }
       } else if (s.selectedAlert && s.selectedAlert !== prev.selectedAlert) {
         const a = s.alerts[s.selectedAlert];
-        if (a) map.flyTo({ center: a.pos, zoom: 17.4, pitch: Math.max(map.getPitch(), 50), duration: 1400, essential: true });
+        if (a) map.flyTo({ center: a.pos, zoom: 16.5, pitch: 0, duration: 1400, essential: true });
       } else if (s.selectedBuilding && s.selectedBuilding !== prev.selectedBuilding) {
         const b = s.buildings[s.selectedBuilding];
         if (b) map.easeTo({ center: b.center, zoom: Math.max(map.getZoom(), 17.2), duration: 900 });
@@ -172,23 +156,20 @@ export function MapView() {
     };
   }, []);
 
-  const toggle3d = () => {
-    const map = mapRef.current;
-    if (!map) return;
-    map.easeTo({ pitch: flat ? HOME.pitch : 0, bearing: flat ? HOME.bearing : 0, duration: 700 });
-    setFlat(!flat);
-  };
-
   const ctl = 'btn grid h-8 w-8 place-items-center p-0';
   return (
     <div className="relative h-full w-full">
       <div ref={el} className="absolute inset-0 h-full w-full" />
       <NavOverlay />
 
+      {mapError && (
+        <div role="alert" className="panel absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2 px-4 py-3 text-center text-sm">
+          Mapbox setup required
+          <div className="mt-1 text-xs text-dim">{mapError}</div>
+        </div>
+      )}
+
       <div className="absolute right-3 top-3 flex flex-col gap-1">
-        <button className={`${ctl} text-[10.5px] font-semibold`} onClick={toggle3d} aria-label={flat ? 'Switch to 3D view' : 'Switch to 2D view'} aria-pressed={!flat}>
-          {flat ? '2D' : '3D'}
-        </button>
         <button className={ctl} onClick={() => mapRef.current?.zoomIn()} aria-label="Zoom in">
           <Icon name="plus" size={14} />
         </button>

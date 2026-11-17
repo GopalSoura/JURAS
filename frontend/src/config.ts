@@ -6,10 +6,11 @@ export const CONFIG = {
   wsUrl,
   /** Backend REST base. Derived from VITE_WS_URL unless VITE_API_URL is set. */
   apiUrl: (import.meta.env.VITE_API_URL as string | undefined) || derivedApi || 'http://localhost:8000',
-  /** Any MapLibre style. CARTO dark-matter needs no API key. */
-  mapStyle:
-    (import.meta.env.VITE_MAP_STYLE as string | undefined) || 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+  mapboxAccessToken: (import.meta.env.VITE_MAPBOX_ACCESS_TOKEN as string | undefined) ?? '',
+  mapStyle: 'mapbox://styles/mapbox/streets-v12',
   center: [74.8575, 32.7285] as [number, number],
+  /** Keep the map focused on Jammu city. */
+  mapBounds: [[74.68, 32.6], [75.05, 32.88]] as [[number, number], [number, number]],
   /** Demo only: responders move this many times faster than real time. */
   timeScale: 5,
 };

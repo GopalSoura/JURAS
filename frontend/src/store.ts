@@ -6,7 +6,7 @@ import { safetyScore } from './lib/metrics';
 import { fetchNavigation, ApiError } from './lib/api';
 
 export interface LogLine { ts: number; text: string; hot: boolean; kind: SensorKind }
-export interface Layers { osm: boolean; lanes: boolean; sensors: boolean; flood: boolean }
+export interface Layers { lanes: boolean; sensors: boolean; flood: boolean }
 export type NavStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 let navAbort: AbortController | null = null;
@@ -92,7 +92,7 @@ export const useStore = create<StoreState>()((set, get) => ({
   selectedAlert: null,
   selectedBuilding: null,
   module: 'overview',
-  layers: { osm: true, lanes: true, sensors: true, flood: true },
+  layers: { lanes: true, sensors: true, flood: true },
   feedStatus: 'connecting',
   feedLabel: '',
   navRoute: null,

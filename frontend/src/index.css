@@ -87,8 +87,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 .mk-incident.sev-high { background: rgba(30, 19, 10, 0.92); border-color: var(--orange); color: #efd0bd; }
 .mk-incident .mk-dot { width: 7px; height: 7px; border-radius: 1px; flex: none; }
-.maplibregl-ctrl-attrib { background: rgba(5, 7, 13, 0.72) !important; color: #5a677f !important; font-size: 10px !important; }
-.maplibregl-ctrl-attrib a { color: #7c8aa5 !important; }
+.mapboxgl-ctrl-attrib { background: rgba(5, 7, 13, 0.72) !important; color: #5a677f !important; font-size: 10px !important; }
+.mapboxgl-ctrl-attrib a { color: #7c8aa5 !important; }
 
 /* Restrained attention cue for critical items (opacity only, no scale/glow). */
 @keyframes blink { 50% { opacity: 0.4; } }

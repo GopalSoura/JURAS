@@ -53,7 +53,6 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
   const pulse = 0.5 + 0.5 * Math.sin(t / 520);
   const nodePos = new Map<string, LonLat>(s.laneNodes.map((n) => [n.id, n.pos]));
   const buildings = Object.values(s.buildings);
-  const height = new Map(buildings.map((b) => [b.id, b.height_m]));
   const focus = focusAlert(s.alerts, s.routes, s.selectedAlert);
   const routes = focus ? s.routes[focus.id] ?? [] : [];
   const hazards = Object.values(s.hazards).filter((h) => h.active);
@@ -96,7 +95,6 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
         lineWidthMinPixels: 1.5,
         stroked: true,
         filled: true,
-        getElevation: 0.3,
       }),
       new TextLayer<FloodZone>({
         id: 'flood-labels',
@@ -147,21 +145,18 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
       id: 'buildings',
       data: buildings,
       getPolygon: (b) => b.footprint,
-      extruded: true,
-      getElevation: (b) => b.height_m,
       getFillColor: (b) => buildingColor(b, s, pulse),
       getLineColor: [110, 130, 165, 110],
       lineWidthMinPixels: 1,
       pickable: true,
       autoHighlight: true,
       highlightColor: [77, 159, 255, 190],
-      material: { ambient: 0.65, diffuse: 0.75, shininess: 12, specularColor: [70, 90, 130] },
       updateTriggers: { getFillColor: [Math.round(t / 160), s.selectedBuilding, s.module] },
     }),
     new TextLayer<Building>({
       id: 'building-labels',
       data: buildings.filter((b) => b.status === 'fire' || b.id === s.selectedBuilding),
-      getPosition: (b) => [...b.center, b.height_m + 4],
+      getPosition: (b) => b.center,
       getText: (b) => b.id,
       getSize: 11,
       getColor: [215, 223, 236, 255],
@@ -288,7 +283,7 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
         new ScatterplotLayer<Unit>({
           id: 'units',
           data: units,
-          getPosition: (u) => [...u.pos, 3],
+          getPosition: (u) => u.pos,
           getRadius: 9,
           radiusUnits: 'pixels',
           getFillColor: (u) => rgba(PROFILE_META[u.route.profile].rgb, 255),
@@ -300,7 +295,7 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
         new TextLayer<Unit>({
           id: 'unit-glyph',
           data: units,
-          getPosition: (u) => [...u.pos, 3],
+          getPosition: (u) => u.pos,
           getText: (u) => PROFILE_META[u.route.profile].glyph,
           getSize: 10,
           getColor: [10, 14, 22, 255],
@@ -348,7 +343,7 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
       new ScatterplotLayer<SensorMeta>({
         id: 'sensors',
         data: s.sensors,
-        getPosition: (m) => [...m.pos, (height.get(m.building_id ?? '') ?? 0) + 1.5],
+        getPosition: (m) => m.pos,
         getRadius: (m) => (sensorColor(m, s).hot ? 4 + 2.5 * pulse : 3.5),
         radiusUnits: 'pixels',
         getFillColor: (m) => sensorColor(m, s).c,
@@ -364,7 +359,7 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
         new TextLayer<SensorMeta>({
           id: 'sensor-labels',
           data: s.sensors,
-          getPosition: (m) => [...m.pos, (height.get(m.building_id ?? '') ?? 0) + 1.5],
+          getPosition: (m) => m.pos,
           getText: (m) => m.node_id,
           getSize: 9,
           getColor: [140, 158, 190, 235],
