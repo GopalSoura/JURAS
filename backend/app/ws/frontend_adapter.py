@@ -80,25 +80,32 @@ class FrontendWorld:
         self.battery: dict[str, float] = {}
         self.zone_key = ""
         self._lock = asyncio.Lock()
+        self._load_lock = asyncio.Lock()
         self._telemetry_task: asyncio.Task | None = None
 
-    async def connect(self, ws: WebSocket) -> None:
+    async def connect(self, ws: WebSocket) -> bool:
         await ws.accept()
-        self.ui_connections.add(ws)
         if self._telemetry_task is None or self._telemetry_task.done():
             self._telemetry_task = asyncio.create_task(self.telemetry_loop())
         if not self.buildings:
-            await self.load_world()
-        await self.send_raw(ws, await self.build_snapshot())
+            async with self._load_lock:
+                if not self.buildings:
+                    await self.load_world()
+        if not await self.send_raw(ws, await self.build_snapshot()):
+            return False
+        self.ui_connections.add(ws)
+        return True
 
     def disconnect(self, ws: WebSocket) -> None:
         self.ui_connections.discard(ws)
 
-    async def send_raw(self, ws: WebSocket, payload: dict[str, Any]) -> None:
+    async def send_raw(self, ws: WebSocket, payload: dict[str, Any]) -> bool:
         try:
             await ws.send_json(payload)
         except Exception:
             self.disconnect(ws)
+            return False
+        return True
 
     async def broadcast(self, payload: dict[str, Any]) -> None:
         dead: list[WebSocket] = []

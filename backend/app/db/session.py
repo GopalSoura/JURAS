@@ -8,7 +8,17 @@ from app.db.base import Base
 
 
 def make_engine(url: str | None = None):
-    return create_async_engine(url or settings.database_url, echo=False, pool_pre_ping=True)
+    # Supabase is remote, so allow more pooled connections than the default
+    # 5 + 10 overflow to absorb bursts (initial UI load, reconnects, simulations).
+    return create_async_engine(
+        url or settings.database_url,
+        echo=False,
+        pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=20,
+        pool_timeout=60,
+        pool_recycle=1800,
+    )
 
 
 engine = make_engine()

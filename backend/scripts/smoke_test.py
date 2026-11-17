@@ -14,7 +14,6 @@ API = f"{BASE}/api/v1"
 PASS = []
 FAIL = []
 
-
 def check(name: str, cond: bool, detail: str = "") -> None:
     (PASS if cond else FAIL).append(name)
     mark = "PASS" if cond else "FAIL"
@@ -66,7 +65,7 @@ def main() -> None:
 
         r = c.get(f"{API}/lanes")
         lanes = r.json().get("features", [])
-        check("lanes geojson (25 demo + 521 osm)", r.status_code == 200 and len(lanes) == 546, f"{len(lanes)} features")
+        check("lanes geojson (25 demo + 700 osm)", r.status_code == 200 and len(lanes) == 725, f"{len(lanes)} features")
         check("lane attrs", all(l["properties"].get("width_m") is not None for l in lanes))
 
         r = c.get(f"{API}/lanes", params={"source": "demo"})
@@ -80,7 +79,7 @@ def main() -> None:
         )
         check(
             "lanes source=osm filter",
-            r.status_code == 200 and len(osm_lanes) == 521 and osm_lane_ok,
+            r.status_code == 200 and len(osm_lanes) == 700 and osm_lane_ok,
             f"{len(osm_lanes)} features",
         )
 
@@ -245,8 +244,8 @@ async def ws_tests() -> None:
             "ui snapshot keys",
             snap.get("t") == "snapshot"
             and len(snap.get("buildings", [])) == 90
-            and len(snap.get("lane_nodes", [])) == 806
-            and len(snap.get("lane_edges", [])) == 546
+            and len(snap.get("lane_nodes", [])) == 1093
+            and len(snap.get("lane_edges", [])) == 725
             and len(snap.get("sensors", [])) == 14,
             f"b={len(snap.get('buildings', []))} n={len(snap.get('lane_nodes', []))}",
         )
