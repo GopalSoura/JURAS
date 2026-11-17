@@ -9,7 +9,11 @@ import { Section } from './cards';
 import { Icon } from './icons';
 
 const PROFILES = Object.keys(NAV_PROFILE_META) as NavProfile[];
-const SNAP_WARNING = /(off-road|off the OSM|snap|road-only)/i;
+// Backend warnings that describe real conditions on the route. Technical
+// provenance strings (OSM/demo-grid, A*, geometry validation, snap jargon)
+// stay in the API response but are not shown to operators.
+const HAZARD_WARNING = /fire hazard/i;
+const FLOOD_WARNING = /waterlogged|flood/i;
 const DEPARTMENTS: { id: NavDepartment; label: string; icon: 'flame' | 'drop' | 'warn' }[] = [
   { id: 'fire', label: 'Fire', icon: 'flame' },
   { id: 'medical', label: 'Medical', icon: 'drop' },
@@ -24,7 +28,6 @@ export function NavigationCard() {
   const navTargetId = useStore((s) => s.navTargetId);
   const navStatus = useStore((s) => s.navStatus);
   const navError = useStore((s) => s.navError);
-  const navErrorCode = useStore((s) => s.navErrorCode);
   const navRoute = useStore((s) => s.navRoute);
   const navProfile = useStore((s) => s.navProfile);
   const navOrigin = useStore((s) => s.navOrigin);
@@ -60,15 +63,19 @@ export function NavigationCard() {
   const isCurrent = !!target && navTargetId === target.id;
   const status = isCurrent ? navStatus : 'idle';
   const route = isCurrent ? navRoute : null;
-  const routeWarnings = route
-    ? [
-        ...route.warnings.filter((warning) => SNAP_WARNING.test(warning)),
-        ...route.warnings.filter((warning) => !SNAP_WARNING.test(warning)),
-      ].slice(0, 4)
-    : [];
+  const routeNotes = useMemo(() => {
+    if (!route) return [];
+    const notes: string[] = [];
+    if (route.warnings.some((w) => HAZARD_WARNING.test(w))) notes.push('Avoids active fire hazard zones.');
+    if (route.warnings.some((w) => FLOOD_WARNING.test(w))) notes.push('Avoids waterlogged roads where possible.');
+    return notes;
+  }, [route]);
   const startGap = route?.route.properties.origin_snap_distance_m ?? 0;
   const endGap = route?.route.properties.destination_snap_distance_m ?? 0;
-  const showSnap = !!route && (startGap > 5 || endGap > 5);
+  const snapGaps = [
+    startGap > 5 ? `${Math.round(startGap)} m from the start` : null,
+    endGap > 5 ? `${Math.round(endGap)} m from the incident` : null,
+  ].filter((gap): gap is string => !!gap);
 
   const [custom, setCustom] = useState(false);
   const [lat, setLat] = useState(() => (activeOrigin?.pos[1] ?? CONFIG.center[1]).toFixed(6));
@@ -177,7 +184,7 @@ export function NavigationCard() {
   };
 
   return (
-    <Section title="Emergency navigation" hint="OSM road network · A*">
+    <Section title="Emergency navigation" hint="Fastest road route">
       <div className="space-y-2">
         <div>
           <div className="label mb-1">Destination</div>
@@ -260,7 +267,7 @@ export function NavigationCard() {
                 })}
               </div>
               <div className="mt-1 text-[10px] leading-snug text-faint">
-                Mapbox-listed {navDepartment} stations near the incident; the fastest routed station is used automatically.
+                Nearest {navDepartment} stations to the incident; the fastest reachable one is used automatically.
               </div>
             </>
           ) : (
@@ -358,7 +365,6 @@ export function NavigationCard() {
 
         {status === 'error' && (
           <div className="border border-crit/40 bg-crit/10 px-2 py-1.5 text-[11px] text-crit">
-            <div className="num font-mono text-[10px] opacity-80">{navErrorCode}</div>
             {navError}
           </div>
         )}
@@ -380,15 +386,14 @@ export function NavigationCard() {
               </div>
             </div>
             <div className="mt-1.5 text-[10.5px] leading-snug text-dim">
-              {NAV_PROFILE_META[route.route.properties.profile].label} · {route.route.properties.edge_count} OSM segments ·{' '}
-              {route.route.properties.duration_basis ?? 'class-speed estimate'}
+              {NAV_PROFILE_META[route.route.properties.profile].label}
             </div>
             {route.origin_station && (
               <div className="mt-1.5 border-t border-line pt-1.5 text-[10.5px] leading-snug text-dim">
                 <span className="text-faint">Station: </span>
                 {route.origin_station.name}
                 {route.origin_station.address ? ` · ${route.origin_station.address}` : ''}
-                <span className="text-faint"> ({route.origin_station.source}, {route.origin_station.distance_m.toFixed(0)} m from incident)</span>
+                <span className="text-faint"> — {formatDistance(route.origin_station.distance_m)} from incident</span>
               </div>
             )}
             {(route.route.properties.closures_considered ?? 0) > 0 && (
@@ -396,17 +401,15 @@ export function NavigationCard() {
                 Re-routed around {route.route.properties.closures_considered} active road closure(s).
               </div>
             )}
-            {showSnap && (
+            {snapGaps.length > 0 && (
               <div className="mt-1.5 border border-warn/40 bg-warn/10 px-1.5 py-1 text-[10.5px] leading-snug text-warn">
-                Road-only route.
-                {startGap > 5 ? ` Start snapped ${Math.round(startGap)} m off-road.` : ''}
-                {endGap > 5 ? ` End snapped ${Math.round(endGap)} m off-road.` : ''} Off-road connectors are not drawn.
+                Route stays on mapped roads. Nearest road is {snapGaps.join('; ')}.
               </div>
             )}
-            {routeWarnings.length > 0 && (
+            {routeNotes.length > 0 && (
               <ul className="mt-1.5 space-y-0.5 text-[10px] leading-snug text-faint">
-                {routeWarnings.map((w) => (
-                  <li key={w}>· {w}</li>
+                {routeNotes.map((note) => (
+                  <li key={note}>· {note}</li>
                 ))}
               </ul>
             )}

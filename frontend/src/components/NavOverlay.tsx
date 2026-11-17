@@ -8,7 +8,6 @@ export function NavOverlay() {
   const status = useStore((s) => s.navStatus);
   const targetId = useStore((s) => s.navTargetId);
   const route = useStore((s) => s.navRoute);
-  const errorCode = useStore((s) => s.navErrorCode);
   const error = useStore((s) => s.navError);
   const clear = useStore((s) => s.clearNavigation);
 
@@ -30,18 +29,15 @@ export function NavOverlay() {
           <div className="truncate text-[11.5px] font-medium">
             {target ? `${target.id} · ${target.title}` : 'Navigation'}
           </div>
-          {status === 'loading' && <div className="text-[10.5px] text-dim">Computing route on the OSM network…</div>}
+          {status === 'loading' && <div className="text-[10.5px] text-dim">Computing route…</div>}
           {status === 'error' && (
-            <div className="truncate text-[10.5px] text-crit">
-              {errorCode}: {error}
-            </div>
+            <div className="truncate text-[10.5px] text-crit">{error}</div>
           )}
           {status === 'ready' && route && (
             <div className="num flex flex-wrap items-baseline gap-x-2 font-mono text-[11px]">
               <b className="text-[14px]">{formatDistance(route.route.properties.distance_m)}</b>
               <span style={{ color: meta?.color }}>{formatEta(route.route.properties.duration_s)}</span>
               <span className="text-dim">{meta?.label}</span>
-              <span className="text-faint">{route.route.properties.edge_count} OSM segments</span>
             </div>
           )}
         </div>
