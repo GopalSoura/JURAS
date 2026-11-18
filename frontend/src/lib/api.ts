@@ -16,6 +16,7 @@ export class ApiError extends Error {
 export interface NavigationRequest {
   origin?: LonLat;
   destination: LonLat;
+  buildingId?: string;
   profile: NavProfile;
   originMode?: NavOriginMode;
   department?: NavDepartment;
@@ -25,13 +26,14 @@ export async function fetchNavigation(
   request: NavigationRequest,
   signal?: AbortSignal,
 ): Promise<NavResponse> {
-  const { origin, destination, profile, originMode = 'coordinates', department } = request;
+  const { origin, destination, buildingId, profile, originMode = 'coordinates', department } = request;
   const response = await fetch(`${CONFIG.apiUrl}/api/v1/routes/navigate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       ...(origin ? { origin: { lat: origin[1], lng: origin[0] } } : {}),
       destination: { lat: destination[1], lng: destination[0] },
+      ...(buildingId ? { destination_building_id: buildingId } : {}),
       profile,
       origin_mode: originMode,
       ...(department ? { department } : {}),

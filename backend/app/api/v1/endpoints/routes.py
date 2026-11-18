@@ -72,8 +72,9 @@ async def list_stations(
 async def navigate(payload: NavigateRequest, session: AsyncSession = Depends(get_session)) -> dict:
     """Plan an emergency route on the imported OSM road network.
 
-    The response geometry is a real LineString following OSM road vertices.
-    The synthetic demo lane grid is never used here.
+    The LineString starts at the requested origin (for nearest-station mode,
+    the station itself) and ends at the incident, with short connectors to the
+    mapped OSM roads in between. The synthetic demo lane grid is never used.
     """
     return await navigation_service.navigate(
         session,
@@ -81,6 +82,7 @@ async def navigate(payload: NavigateRequest, session: AsyncSession = Depends(get
         origin_lng=payload.origin.lng if payload.origin else None,
         destination_lat=payload.destination.lat,
         destination_lng=payload.destination.lng,
+        destination_building_id=payload.destination_building_id,
         profile=payload.profile,
         weighting=payload.weighting,
         avoid_hazards=payload.avoid_hazards,

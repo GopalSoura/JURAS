@@ -8,7 +8,7 @@ import { buildLayers, tooltipFor } from '../lib/layers';
 import { focusAlert, fmtEta, isOpen } from '../lib/metrics';
 import { pointAlong } from '../lib/geo';
 import { PROFILE_META } from '../lib/meta';
-import { navRouteBounds } from '../lib/navigation';
+import { navRouteBounds, navRouteLine, snapToRouteLine } from '../lib/navigation';
 import type { LonLat } from '../types';
 import { FLAME_SVG, Icon } from './icons';
 import { NavOverlay } from './NavOverlay';
@@ -128,9 +128,17 @@ export function MapView() {
     map.on('click', (event) => {
       const state = useStore.getState();
       if (!state.navClosureMode) return;
+      const clicked: LonLat = [event.lngLat.lng, event.lngLat.lat];
+      const drawnLines = [
+        navRouteLine(state.navRoute),
+        ...Object.values(state.routes).flatMap((rs) =>
+          rs.filter((r) => r.feasible).map((r) => r.path),
+        ),
+      ];
+      const pos = snapToRouteLine(clicked, drawnLines);
       void state.addNavClosure({
-        lat: event.lngLat.lat,
-        lng: event.lngLat.lng,
+        lat: pos[1],
+        lng: pos[0],
         radius_m: 18,
         reason: 'Road closed at map click',
         source: 'manual',

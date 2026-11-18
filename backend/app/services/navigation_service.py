@@ -7,7 +7,8 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppError
-from app.repositories import lane_repo
+from app.repositories import building_repo, lane_repo
+from app.routing.building_access import trim_route_to_entrance
 from app.routing.osm_graph import (
     DURATION_BASIS,
     NavigationError,
@@ -178,6 +179,7 @@ async def navigate(
     *,
     destination_lat: float,
     destination_lng: float,
+    destination_building_id: str | None = None,
     origin_lat: float | None = None,
     origin_lng: float | None = None,
     profile: str = "fire_truck",
@@ -186,7 +188,15 @@ async def navigate(
     department: str | None = None,
     origin_mode: str = "coordinates",
 ) -> dict[str, Any]:
-    """Plan a route on imported OSM geometry only (never the demo grid)."""
+    """Plan a route on imported OSM geometry (never the demo grid).
+
+    The drawn line starts at the requested origin and ends at the requested
+    destination; only the middle follows OSM edges. Off-road gaps are short
+    connectors and are reported as snap distances instead of being routed on.
+    When ``destination_building_id`` names a building, the final connector is
+    trimmed at its street-facing footprint edge so the route stops at the
+    building front instead of driving to its centre.
+    """
     ctx = (
         app_state.routing_ctx()
         if avoid_hazards
@@ -228,6 +238,18 @@ async def navigate(
             )
         except NavigationError as exc:
             _raise_navigation_error(exc)
+
+    if destination_building_id:
+        building = await building_repo.get_by_code(session, destination_building_id)
+        if building is not None and building.footprint:
+            gate = trim_route_to_entrance(
+                result,
+                building.footprint,
+                [destination_lng, destination_lat],
+                building.name,
+            )
+            if gate is not None:
+                destination_lng, destination_lat = gate
 
     properties = {
         "distance_m": int(round(result.distance_m)),

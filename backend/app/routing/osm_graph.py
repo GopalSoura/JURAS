@@ -1280,13 +1280,15 @@ def compute_navigation(
         penalties,
     )
 
-    coords: list[list[float]] = []
+    # The middle of the route must stay strictly on the mapped OSM edges. Snap
+    # points are the first/last points of that road-only line.
+    road_coords: list[list[float]] = []
 
-    def add_point(point: list[float]) -> None:
-        if not coords or coords[-1] != point:
-            coords.append(list(point))
+    def add_road_point(point: list[float]) -> None:
+        if not road_coords or road_coords[-1] != point:
+            road_coords.append(list(point))
 
-    add_point(origin.point)
+    add_road_point(origin.point)
     step_geometries: list[list[list[float]]] = []
     edge_ids: list[str] = []
     unverified_width = False
@@ -1297,22 +1299,39 @@ def compute_navigation(
             sliced = []
         step_geometries.append(sliced)
         for point in sliced:
-            add_point(point)
+            add_road_point(point)
         if step.edge.id not in edge_ids:
             edge_ids.append(step.edge.id)
         if step.edge.width_m > 0 and not step.edge.width_verified:
             unverified_width = True
-    add_point(destination.point)
-    if len(coords) == 1:
-        coords.append(list(coords[0]))
+    add_road_point(destination.point)
+    if len(road_coords) == 1:
+        road_coords.append(list(road_coords[0]))
 
-    violations = validate_route_geometry(coords, [step.edge for step in steps])
+    violations = validate_route_geometry(road_coords, [step.edge for step in steps])
     if violations:
         raise NavigationError(
             "ROUTE_GEOMETRY_INVALID",
             "No road-aligned route geometry could be produced: " + "; ".join(violations[:3]),
             status_code=500,
         )
+
+    # Draw from the actual requested endpoints (e.g. the station gate and the
+    # incident), not from the nearest road vertices. The off-road gaps become
+    # short straight connectors; distance/ETA remain road-only and the snap
+    # distances are reported separately.
+    requested_origin = [float(origin_lng), float(origin_lat)]
+    requested_destination = [float(destination_lng), float(destination_lat)]
+    coords: list[list[float]] = []
+
+    def add_point(point: list[float]) -> None:
+        if not coords or coords[-1] != point:
+            coords.append(list(point))
+
+    add_point(requested_origin)
+    for point in road_coords:
+        add_point(point)
+    add_point(requested_destination)
 
     road_distance = sum(_path_length(geometry) for geometry in step_geometries)
     road_duration = sum(
@@ -1335,7 +1354,7 @@ def compute_navigation(
 
     warnings: list[str] = [
         "Route follows imported OpenStreetMap geometry, not the synthetic demo grid.",
-        "Route geometry is road-only; off-road gaps are reported as snap distances.",
+        "Route starts and ends at the requested points; short connectors join them to the nearest OSM roads.",
         "Turn-by-turn instructions are derived from OSM way geometry and highway class.",
     ]
     hazard_list = list(hazards or ())
@@ -1352,12 +1371,12 @@ def compute_navigation(
     if access_distance > ACCESS_WARN_DISTANCE_M:
         warnings.append(
             f"Start point is {access_distance:.0f} m off the OSM road network; "
-            "the route starts at the nearest OSM road point."
+            "a short connector links it to the first mapped road."
         )
     if egress_distance > ACCESS_WARN_DISTANCE_M:
         warnings.append(
             f"Destination is {egress_distance:.0f} m off the OSM road network; "
-            "the route ends at the nearest OSM road point."
+            "a short connector links the last mapped road to it."
         )
     if unverified_width:
         warnings.append(

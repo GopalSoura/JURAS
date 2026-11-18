@@ -403,7 +403,7 @@ export function NavigationCard() {
             )}
             {snapGaps.length > 0 && (
               <div className="mt-1.5 border border-warn/40 bg-warn/10 px-1.5 py-1 text-[10.5px] leading-snug text-warn">
-                Route stays on mapped roads. Nearest road is {snapGaps.join('; ')}.
+                Route starts at the selected origin (the station in nearest-station mode) and ends at the incident; short links join both ends to mapped roads ({snapGaps.join('; ')}).
               </div>
             )}
             {routeNotes.length > 0 && (

@@ -12,6 +12,21 @@ export const distM = (a: LonLat, b: LonLat): number =>
 
 export const midpoint = (a: LonLat, b: LonLat): LonLat => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
 
+/** Closest point on a segment, in the same local metre grid used by distM. */
+export function nearestOnSegment(p: LonLat, a: LonLat, b: LonLat): { point: LonLat; distance_m: number } {
+  const px = (p[0] - ORIGIN[0]) * M_LON;
+  const py = (p[1] - ORIGIN[1]) * M_LAT;
+  const ax = (a[0] - ORIGIN[0]) * M_LON;
+  const ay = (a[1] - ORIGIN[1]) * M_LAT;
+  const dx = (b[0] - a[0]) * M_LON;
+  const dy = (b[1] - a[1]) * M_LAT;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq <= 0) return { point: [...a] as LonLat, distance_m: distM(p, a) };
+  const u = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+  const point: LonLat = [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u];
+  return { point, distance_m: distM(p, point) };
+}
+
 export function cumulative(path: LonLat[]): number[] {
   const out = [0];
   for (let i = 1; i < path.length; i++) out.push(out[i - 1] + distM(path[i - 1], path[i]));

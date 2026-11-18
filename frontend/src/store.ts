@@ -261,6 +261,7 @@ export const useStore = create<StoreState>()((set, get) => ({
         {
           ...(origin ? { origin: origin.pos } : {}),
           destination: alert.pos,
+          ...(alert.building_id ? { buildingId: alert.building_id } : {}),
           profile: get().navProfile,
           originMode: navOriginMode,
           ...(navOriginMode === 'nearest_station' ? { department: navDepartment } : {}),

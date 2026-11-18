@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import text
 
 from app.db.session import get_session
+from app.models import Building
 from app.services.osm_import_service import import_osm
 from app.state import app_state
 
@@ -182,7 +183,7 @@ async def test_navigate_validation_contract(client):
     assert missing.status_code == 422
 
 
-async def test_navigate_returns_road_only_turn_by_turn_steps(client, imported_osm):
+async def test_navigate_connects_requested_endpoints_with_road_only_steps(client, imported_osm):
     origin = (74.8590, 32.7290 + 20.0 / 110574.0)
     destination = (74.8598, 32.7293)
     response = await client.post(
@@ -192,8 +193,8 @@ async def test_navigate_returns_road_only_turn_by_turn_steps(client, imported_os
     assert response.status_code == 200, response.text
     body = response.json()
     coordinates = body["route"]["geometry"]["coordinates"]
-    assert coordinates[0] == pytest.approx([74.8590, 32.7290])
-    assert coordinates[0] != pytest.approx(list(origin))
+    assert coordinates[0] == pytest.approx(list(origin))
+    assert [74.8590, 32.7290] in coordinates
     assert coordinates[-1] == pytest.approx(list(destination))
     properties = body["route"]["properties"]
     assert properties["steps"]
@@ -203,7 +204,62 @@ async def test_navigate_returns_road_only_turn_by_turn_steps(client, imported_os
     assert properties["access_distance_m"] == pytest.approx(20.0, abs=1.0)
     assert properties["road_distance_m"] > 0
     assert properties["distance_m"] == pytest.approx(properties["road_distance_m"], abs=1.0)
-    assert any("road-only" in warning for warning in properties["warnings"])
+    assert any("nearest OSM roads" in warning for warning in properties["warnings"])
+
+
+async def test_navigate_trims_the_final_connector_at_the_building_frontage(
+    client, imported_osm, db
+):
+    footprint = [
+        [74.8599, 32.7291],
+        [74.8601, 32.7291],
+        [74.8601, 32.7293],
+        [74.8599, 32.7293],
+        [74.8599, 32.7291],
+    ]
+    center = [74.8600, 32.7292]
+    db.add(
+        Building(
+            code="B-TEST",
+            name="Frontage Block",
+            floors=2,
+            building_type="Residential",
+            construction="Brick",
+            occupancy=10,
+            year_built=1980,
+            height_m=6.6,
+            priority=50,
+            status="ok",
+            center=center,
+            footprint=footprint,
+            access_node_code="",
+            attributes={},
+            geom=(
+                "POLYGON(("
+                + ", ".join(f"{p[0]:.8f} {p[1]:.8f}" for p in footprint)
+                + "))"
+            ),
+            center_point=f"POINT({center[0]:.8f} {center[1]:.8f})",
+        )
+    )
+    await db.commit()
+
+    response = await client.post(
+        "/api/v1/routes/navigate",
+        json={
+            **_nav_body((74.8590, 32.7290), center),
+            "destination_building_id": "B-TEST",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    coordinates = body["route"]["geometry"]["coordinates"]
+    assert coordinates[-1] == pytest.approx([74.8600, 32.7291], abs=1e-5)
+    assert body["destination"]["lat"] == pytest.approx(32.7291, abs=1e-5)
+    assert body["destination"]["lng"] == pytest.approx(74.8600, abs=1e-5)
+    assert any(
+        "street-facing entrance" in warning for warning in body["warnings"]
+    )
 
 
 async def test_navigate_without_osm_import_reports_empty_graph(client, db):

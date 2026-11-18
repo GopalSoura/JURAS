@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.routing.building_access import trim_route_to_entrance
 from app.routing.osm_graph import (
     NavigationError,
     NavigationGraph,
@@ -73,7 +74,7 @@ def _route_payload(
     if result.egress_distance_m > 25.0:
         gaps.append(f"end {round(result.egress_distance_m)} m off-road")
     if gaps:
-        note = f"{note} Endpoint snap gaps: {' and '.join(gaps)}; connectors are not drawn."
+        note = f"{note} Endpoint snap gaps: {' and '.join(gaps)}; short connectors are drawn to both ends."
     return {
         "profile": profile,
         "path": result.geometry,
@@ -118,6 +119,7 @@ def plan_osm_routes_for_building(
     *,
     building_center: list[float],
     building_name: str,
+    building_footprint: list[list[float]] | None = None,
     fire_post: list[float],
     medical_post: list[float],
     assemblies: list[list[float]],
@@ -185,6 +187,10 @@ def plan_osm_routes_for_building(
                 )
             )
             continue
+        if building_footprint:
+            trim_route_to_entrance(
+                result, building_footprint, building_center, building_name
+            )
         out.append(
             _route_payload(
                 result,
@@ -199,7 +205,9 @@ def plan_osm_routes_for_building(
     last_error: NavigationError | None = None
     for assembly, label in zip(assemblies, labels):
         try:
-            result = _compute(graph, building_center, assembly, "walking", hazards, floods)
+            result = _compute(
+                graph, building_center, assembly, "walking", hazards, floods, closures
+            )
         except NavigationError as exc:
             last_error = exc
             continue

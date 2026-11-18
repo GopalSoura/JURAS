@@ -1,3 +1,4 @@
+import { nearestOnSegment } from './geo';
 import type { LonLat, NavResponse } from '../types';
 
 export function isValidLonLat(value: unknown): value is LonLat {
@@ -12,6 +13,22 @@ export function navRouteLine(nav: NavResponse | null): LonLat[] {
   if (!Array.isArray(coordinates) || coordinates.length < 2) return [];
   if (!coordinates.every(isValidLonLat)) return [];
   return coordinates;
+}
+
+/** Snap a map click onto the nearest drawn route so the closure really blocks it. */
+export function snapToRouteLine(point: LonLat, lines: LonLat[][], maxDistanceM = 60): LonLat {
+  let best = point;
+  let bestDistance = maxDistanceM;
+  for (const line of lines) {
+    for (let i = 1; i < line.length; i++) {
+      const candidate = nearestOnSegment(point, line[i - 1], line[i]);
+      if (candidate.distance_m < bestDistance) {
+        bestDistance = candidate.distance_m;
+        best = candidate.point;
+      }
+    }
+  }
+  return best;
 }
 
 export function navRouteBounds(nav: NavResponse | null): [[number, number], [number, number]] | null {

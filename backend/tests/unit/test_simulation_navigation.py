@@ -60,6 +60,37 @@ def test_plan_osm_routes_maps_profiles_and_keeps_ws_route_shape():
     assert evacuation["path"][-1] == pytest.approx([74.8580, 32.7295])
 
 
+def test_response_routes_stop_at_the_street_facing_frontage():
+    building_center = [74.8590, 32.7288]
+    footprint = [
+        [74.8589, 32.7287],
+        [74.8591, 32.7287],
+        [74.8591, 32.7289],
+        [74.8589, 32.7289],
+        [74.8589, 32.7287],
+    ]
+    routes = plan_osm_routes_for_building(
+        demo_graph(),
+        building_center=building_center,
+        building_name="Roadside Block",
+        building_footprint=footprint,
+        fire_post=[74.8576, 32.7285],
+        medical_post=[74.8594, 32.7285],
+        assemblies=[[74.8580, 32.7295]],
+        fire_label="Fire Post A",
+        medical_label="Medical Post E",
+        assembly_labels=["Assembly G"],
+    )
+
+    for route in routes[:2]:
+        path = route["path"]
+        assert path[-1] == pytest.approx([74.8590, 32.7287], abs=1e-6)
+        assert path[-1] != pytest.approx(building_center)
+
+    # Evacuation still starts at the building centre; only arrivals are trimmed.
+    assert routes[2]["path"][0] == pytest.approx(building_center)
+
+
 def test_plan_osm_routes_returns_empty_paths_without_osm_graph():
     routes = plan_osm_routes_for_building(
         None,
@@ -83,6 +114,24 @@ def test_plan_osm_routes_returns_empty_paths_without_osm_graph():
     assert routes[0]["from"] == "Fire Post A"
     assert routes[1]["from"] == "Medical Post E"
     assert routes[2]["to"] == "Assembly G"
+
+
+def test_closures_block_evacuation_routes_too():
+    routes = plan_osm_routes_for_building(
+        demo_graph(),
+        building_center=[74.8590, 32.7285],
+        building_name="Block 14",
+        fire_post=[74.8576, 32.7285],
+        medical_post=[74.8594, 32.7285],
+        assemblies=[[74.8580, 32.7295]],
+        assembly_labels=["Assembly G"],
+        closures=[{"pos": [74.8580, 32.7285], "radius_m": 18.0}],
+    )
+    evacuation = routes[2]
+    assert evacuation["profile"] == "evacuation"
+    assert evacuation["feasible"] is False
+    assert evacuation["path"] == []
+    assert "closure" in evacuation["note"].lower() or "route" in evacuation["note"].lower()
 
 
 def test_plan_osm_routes_reports_infeasible_profile_without_fabricated_path():

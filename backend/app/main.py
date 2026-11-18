@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -15,6 +17,7 @@ from app.core.logging import setup_logging
 from app.db.session import SessionFactory, check_db, dispose_engine
 from app.realtime.bus import bus
 from app.simulation.manager import SimulationManager
+from app.state import app_state
 from app.ws.frontend_adapter import FrontendWorld
 from app.ws.ws_routes import router as ws_router
 
@@ -31,12 +34,34 @@ async def lifespan(app: FastAPI):
     set_runtime(manager, world)
     runtime["manager"] = manager
     runtime["world"] = world
+
+    # Closure changes must refresh the pushed response routes as well, so the
+    # alternate shortest path never still uses a road the operator just closed.
+    replan_tasks: set[asyncio.Task] = set()
+
+    def on_closure_replan_done(task: asyncio.Task) -> None:
+        replan_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logging.getLogger("juras").error("Closure route replan failed", exc_info=exc)
+
+    def on_closures_changed() -> None:
+        task = asyncio.get_running_loop().create_task(world.replan_routes_for_closures())
+        replan_tasks.add(task)
+        task.add_done_callback(on_closure_replan_done)
+
+    app_state.on_closures_changed(on_closures_changed)
     ok = await check_db()
     if not ok:
         import logging
 
         logging.getLogger("juras").warning("Database not reachable at startup")
     yield
+    app_state.remove_closure_listener(on_closures_changed)
+    for task in list(replan_tasks):
+        task.cancel()
     await manager.shutdown()
     task = world._telemetry_task
     if task is not None:
@@ -57,7 +82,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins or ["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 

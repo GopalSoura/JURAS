@@ -274,7 +274,7 @@ def test_turn_by_turn_steps_follow_osm_ways():
     assert result.geometry[-1] == pytest.approx([74.8580, 32.7300])
 
 
-def test_offroad_connectors_are_excluded_from_geometry_and_totals():
+def test_offroad_connectors_are_drawn_from_requested_endpoints():
     road = way("OSM-70", [[74.8575, 32.7285], [74.8600, 32.7285]], highway="secondary")
     graph = build_navigation_graph([road])
     origin = [74.8580, 32.7285 + 20.0 / 110574.0]
@@ -282,10 +282,12 @@ def test_offroad_connectors_are_excluded_from_geometry_and_totals():
     result = compute_navigation(
         graph, origin[1], origin[0], destination[1], destination[0], "responder_bike"
     )
-    assert result.geometry[0] == pytest.approx([74.8580, 32.7285])
-    assert result.geometry[-1] == pytest.approx([74.8590, 32.7285])
-    assert origin not in result.geometry
-    assert destination not in result.geometry
+    # The drawn line starts at the station/incident coordinates instead of the
+    # snapped road point, so nothing is missing at either end of the route.
+    assert result.geometry[0] == pytest.approx(origin)
+    assert result.geometry[-1] == pytest.approx(destination)
+    assert [74.8580, 32.7285] in result.geometry
+    assert [74.8590, 32.7285] in result.geometry
     assert result.access_distance_m == pytest.approx(20.0, abs=1.0)
     assert result.egress_distance_m == pytest.approx(15.0, abs=1.0)
     assert result.steps[0].maneuver == "depart"
@@ -293,7 +295,8 @@ def test_offroad_connectors_are_excluded_from_geometry_and_totals():
     assert result.steps[-1].maneuver == "arrive"
     assert result.distance_m == pytest.approx(result.road_distance_m, abs=0.5)
     assert result.duration_s == pytest.approx(result.road_duration_s, abs=0.5)
-    assert validate_route_geometry(result.geometry, list(graph.edges.values())) == []
+    road_geometry = result.geometry[1:-1]
+    assert validate_route_geometry(road_geometry, list(graph.edges.values())) == []
 
 
 def test_route_geometry_validation_flags_offroad_connector():

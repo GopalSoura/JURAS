@@ -51,6 +51,7 @@ class NavigatePoint(BaseModel):
 class NavigateRequest(BaseModel):
     origin: NavigatePoint | None = None
     destination: NavigatePoint
+    destination_building_id: str | None = None
     profile: Literal["fire_truck", "responder_bike", "walking"] = "fire_truck"
     weighting: Literal["time", "distance"] = "time"
     avoid_hazards: bool = True

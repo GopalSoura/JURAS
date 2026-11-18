@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import logging
 import threading
+from collections.abc import Callable
 from typing import Any
+
+logger = logging.getLogger("juras.state")
+
+ClosureListener = Callable[[], None]
 
 
 class AppState:
@@ -11,6 +17,23 @@ class AppState:
         self.flood_zones: list[dict[str, Any]] = []
         self.closures: dict[str, dict[str, Any]] = {}
         self._closure_seq = 0
+        self._closure_listeners: list[ClosureListener] = []
+
+    def on_closures_changed(self, listener: ClosureListener) -> None:
+        """Register a callback fired after a closure is added, removed or cleared."""
+        if listener not in self._closure_listeners:
+            self._closure_listeners.append(listener)
+
+    def remove_closure_listener(self, listener: ClosureListener) -> None:
+        if listener in self._closure_listeners:
+            self._closure_listeners.remove(listener)
+
+    def _notify_closures_changed(self) -> None:
+        for listener in list(self._closure_listeners):
+            try:
+                listener()
+            except Exception:
+                logger.exception("Closure change listener failed")
 
     def set_hazard(self, hazard_id: str, data: dict[str, Any]) -> None:
         with self._lock:
@@ -52,15 +75,22 @@ class AppState:
                 "active": True,
             }
             self.closures[closure_id] = data
-            return dict(data)
+        self._notify_closures_changed()
+        return dict(data)
 
     def remove_closure(self, closure_id: str) -> bool:
         with self._lock:
-            return self.closures.pop(closure_id, None) is not None
+            removed = self.closures.pop(closure_id, None) is not None
+        if removed:
+            self._notify_closures_changed()
+        return removed
 
     def clear_closures(self) -> None:
         with self._lock:
+            had_closures = bool(self.closures)
             self.closures.clear()
+        if had_closures:
+            self._notify_closures_changed()
 
     def closures_snapshot(self) -> list[dict[str, Any]]:
         with self._lock:

@@ -311,11 +311,12 @@ class FrontendWorld:
         if alert["module"] == "fire" and alert.get("building_id"):
             bid = alert["building_id"]
             self.fires.pop(bid, None)
-            hz = self.hazards.get(f"HZ-{bid}")
+            hz_id = f"HZ-{bid}"
+            app_state.deactivate_hazard(hz_id)
+            hz = self.hazards.get(hz_id)
             if hz:
                 hz = {**hz, "active": False}
-                self.hazards[hz["id"]] = hz
-                app_state.deactivate_hazard(hz["id"])
+                self.hazards[hz_id] = hz
                 await self.broadcast({"t": "hazard", "hazard": hz})
             self.routes.pop(alert["id"], None)
             await self.broadcast({"t": "routes", "alert_id": alert["id"], "routes": []})
@@ -402,6 +403,7 @@ class FrontendWorld:
             if incident is None:
                 incident = await incident_repo.get_by_code(session, alert_id)
             if incident is None:
+                await self._apply_live_alert_action(alert_id, action)
                 return
             events: list[tuple[str, dict[str, Any]]] = []
             if action == "ack" and incident.status == "open":
@@ -428,6 +430,35 @@ class FrontendWorld:
 
         for name, data in events:
             await bus.broadcast_event(name, data)
+
+    async def _apply_live_alert_action(self, alert_id: str, action: str) -> None:
+        """Resolve/ack/dispatch a dashboard alert that has no DB incident row.
+
+        Fire, flood and structural alerts are produced live by sensor fusion, so
+        they normally exist only in this in-memory world. Without this fallback
+        the dashboard buttons silently did nothing for them.
+        """
+        alert = self.alerts.get(alert_id)
+        if alert is None or alert.get("status") == "resolved":
+            return
+        ts = now_ms()
+        if action == "ack":
+            alert = {**alert, "status": "ack", "updated_at": ts}
+        elif action == "dispatch":
+            alert = {
+                **alert,
+                "status": "dispatched",
+                "dispatched_at": alert.get("dispatched_at") or ts,
+                "updated_at": ts,
+            }
+        elif action == "resolve":
+            alert = {**alert, "status": "resolved", "updated_at": ts}
+        else:
+            return
+        self.alerts[alert_id] = alert
+        await self.broadcast({"t": "alert", "alert": alert})
+        if action == "resolve":
+            await self._on_resolved(alert)
 
     def _target_suffix(self, incident: Incident) -> str:
         bcode = self.building_by_id.get(str(incident.building_id)) if incident.building_id else None
@@ -660,6 +691,7 @@ class FrontendWorld:
                 self.osm_graph,
                 building_center=list(b["center"]),
                 building_name=b["name"],
+                building_footprint=list(building.footprint or b.get("footprint") or []),
                 fire_post=fire_post,
                 medical_post=medical_post,
                 assemblies=assemblies,
@@ -675,6 +707,20 @@ class FrontendWorld:
             )
             self.routes[alert_id] = routes
             await self.broadcast({"t": "routes", "alert_id": alert_id, "routes": routes})
+
+    async def replan_routes_for_closures(self) -> None:
+        """Refresh every active response route after an operator closure change.
+
+        The navigation API re-plans on its own, but the response routes pushed
+        over the WebSocket were previously left stale and kept showing the now
+        blocked road as the secondary shortest path.
+        """
+        for aid in list(self.routes.keys()):
+            alert = self.alerts.get(aid)
+            b = self.buildings.get((alert or {}).get("building_id") or "")
+            hz = self.hazards.get(f"HZ-{b['id']}") if b else None
+            if alert and b and hz and hz.get("active", True):
+                await self._plan_fire_routes(aid, b, hz)
 
     def _post_pos(self, code: str) -> list[float]:
         if self.graph is not None and code in self.graph.nodes:
