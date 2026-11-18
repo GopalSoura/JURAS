@@ -1,3 +1,6 @@
+import pytest
+
+from app.core.exceptions import NotFoundError
 from app.services.reading_service import ingest
 from app.services.incident_service import transition
 
@@ -79,3 +82,27 @@ async def test_reading_tagged_synthetic(db, seeded_world):
     assert reading.simulation is True
     assert reading.source == "simulation"
     assert reading.simulation_id is None
+
+
+async def test_sensor_only_reading_inherits_sensor_building(db, seeded_world):
+    result = await ingest(
+        db,
+        {"sensor_id": str(seeded_world["sensor"].id), "hazard": "fire",
+         "values": {"temperature_c": 95, "smoke_level": 88, "smoke_ppm": 880},
+         "source": "field", "simulation": False},
+    )
+    assert result["risk"]["entity_type"] == "building"
+    assert result["risk"]["entity_code"] == "B-T1"
+    assert result["risk"]["category"] == "critical"
+    assert result["incident_created"] is True
+
+
+async def test_building_without_matching_sensor_returns_404(db, seeded_world):
+    with pytest.raises(NotFoundError) as exc:
+        await ingest(
+            db,
+            {"building_id": "B-T1", "hazard": "structural",
+             "values": {"tilt_deg": 1.0, "crack_mm": 1.2}},
+        )
+    assert exc.value.code == "SENSOR_NOT_FOUND"
+    assert exc.value.status_code == 404

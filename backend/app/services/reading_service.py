@@ -22,15 +22,14 @@ async def ingest(
     simulation = None
 
     sensor_id = payload.get("sensor_id")
+    building_id = payload.get("building_id")
     if sensor_id:
         sensor = await sensor_repo.get_by_id(session, str(sensor_id))
         if sensor is None:
             raise NotFoundError("SENSOR_NOT_FOUND", f"Sensor {sensor_id} does not exist")
-        building_id = payload.get("building_id")
         if not building_id and sensor.building_id:
             building_id = str(sensor.building_id)
 
-    building_id = payload.get("building_id")
     if building_id:
         building = await building_repo.get_by_id(session, str(building_id))
         if building is None:
@@ -49,6 +48,11 @@ async def ingest(
         kind_map = {"fire": "smoke_temp", "flood": "rain_level", "structural": "structure"}
         if building:
             sensor = await sensor_repo.find_for_building(session, building.id, kind_map[hazard])
+            if sensor is None:
+                raise NotFoundError(
+                    "SENSOR_NOT_FOUND",
+                    f"Building {building.code} has no {kind_map[hazard]} sensor",
+                )
         else:
             raise ValidationAppError("TARGET_REQUIRED", "sensor_id or building_id required")
 
