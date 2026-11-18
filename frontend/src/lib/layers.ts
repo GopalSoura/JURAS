@@ -53,6 +53,39 @@ function sensorColor(m: SensorMeta, s: StoreState): { c: RGBA; hot: boolean } {
   return { c: [95, 175, 230, 235], hot: false };
 }
 
+type PulseTier = 'ok' | 'warn' | 'alert';
+
+const PULSE_RGB: Record<PulseTier, RGB> = {
+  ok: [63, 191, 133],
+  warn: [232, 166, 60],
+  alert: [227, 93, 106],
+};
+
+/**
+ * Realtime Mode only: pulse tier for a sensor that is actually reporting a live
+ * reading, otherwise null. Sensors with no live data get no pulse, so missing
+ * data never looks like a healthy "normal" reading.
+ */
+function sensorPulse(m: SensorMeta, s: StoreState): PulseTier | null {
+  if (s.mode !== 'realtime') return null;
+  const live = s.liveState[m.node_id];
+  if (!live || !live.values || Object.keys(live.values).length === 0) return null;
+  // Only sensors that are actually reporting from a Wokwi hardware node: the
+  // reading carries the device_id and is not stale. Everything else stays off.
+  if (!live.device_id || live.stale) return null;
+  const cat = s.liveRisks[m.node_id]?.category;
+  if (cat === 'critical' || cat === 'high') return 'alert';
+  if (cat === 'warning') return 'warn';
+  return 'ok';
+}
+
+/** Stable per-sensor offset so the waves do not all start in lockstep. */
+function pulsePhase(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 997;
+  return h / 997;
+}
+
 export function buildLayers(s: StoreState, t: number, now: number, zoom: number): Layer[] {
   const pulse = 0.5 + 0.5 * Math.sin(t / 520);
   const nodePos = new Map<string, LonLat>(s.laneNodes.map((n) => [n.id, n.pos]));
@@ -376,6 +409,46 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
 
   // ---- sensor nodes ----
   if (s.layers.sensors) {
+    // Realtime Mode only: a live pulse/wave around every sensor that is
+    // actually reporting from a Wokwi node. Green = OK, amber = warning,
+    // red = risk. Sensors with no live hardware reading show nothing, so
+    // missing data never looks like a healthy "normal" reading.
+    if (realtime) {
+      const pulsing = s.sensors.filter((m) => sensorPulse(m, s) !== null);
+      if (pulsing.length) {
+        const period = 1800;
+        const ring = (m: SensorMeta) => (t / period + pulsePhase(m.node_id)) % 1;
+        layers.push(
+          new ScatterplotLayer<SensorMeta>({
+            id: 'sensor-pulse',
+            data: pulsing,
+            getPosition: (m) => m.pos,
+            getRadius: (m) => 7 + 22 * ring(m),
+            radiusUnits: 'pixels',
+            filled: false,
+            stroked: true,
+            getLineColor: (m) => rgba(PULSE_RGB[sensorPulse(m, s) ?? 'ok'], Math.round(185 * (1 - ring(m)))),
+            lineWidthMinPixels: 1.5,
+            updateTriggers: {
+              getRadius: [Math.round(t / 80)],
+              getLineColor: [Math.round(t / 80), s.liveState, s.liveRisks, s.mode],
+            },
+          }),
+          new ScatterplotLayer<SensorMeta>({
+            id: 'sensor-pulse-core',
+            data: pulsing,
+            getPosition: (m) => m.pos,
+            getRadius: 4 + 3 * pulse,
+            radiusUnits: 'pixels',
+            getFillColor: (m) => rgba(PULSE_RGB[sensorPulse(m, s) ?? 'ok'], 80),
+            updateTriggers: {
+              getRadius: [Math.round(t / 160)],
+              getFillColor: [s.liveState, s.liveRisks, s.mode],
+            },
+          }),
+        );
+      }
+    }
     layers.push(
       new ScatterplotLayer<SensorMeta>({
         id: 'sensors',
