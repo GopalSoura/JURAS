@@ -38,7 +38,11 @@ function buildingColor(b: Building, s: StoreState, pulse: number): RGBA {
 }
 
 function sensorColor(m: SensorMeta, s: StoreState): { c: RGBA; hot: boolean } {
-  const v = s.nodeState[m.node_id]?.values;
+  const realtime = s.mode === 'realtime';
+  const risk = realtime ? s.liveRisks[m.node_id] : s.risks[m.node_id];
+  if (risk?.category === 'critical') return { c: [227, 93, 106, 255], hot: true };
+  if (risk?.category === 'high') return { c: [232, 145, 60, 255], hot: true };
+  const v = realtime ? s.liveState[m.node_id]?.values : s.nodeState[m.node_id]?.values;
   if (v) {
     if (m.kind === 'smoke_temp' && (v.smoke_ppm > 120 || v.temp_c > 45)) return { c: [227, 93, 106, 255], hot: true };
     if (m.kind === 'structure' && (v.tilt_deg >= 0.45 || v.crack_mm >= 0.55)) return { c: [224, 122, 69, 255], hot: true };
@@ -53,6 +57,7 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
   const pulse = 0.5 + 0.5 * Math.sin(t / 520);
   const nodePos = new Map<string, LonLat>(s.laneNodes.map((n) => [n.id, n.pos]));
   const buildings = Object.values(s.buildings);
+  const realtime = s.mode === 'realtime';
   const focus = focusAlert(s.alerts, s.routes, s.selectedAlert);
   const routes = focus ? s.routes[focus.id] ?? [] : [];
   const hazards = Object.values(s.hazards).filter((h) => h.active);
@@ -63,7 +68,7 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
     const flooded = (e: LaneEdge) => {
       const a = nodePos.get(e.a);
       const b = nodePos.get(e.b);
-      if (!a || !b) return false;
+      if (!a || !b || realtime) return false;
       const mid = midpoint(a, b);
       return s.floodZones.some((z) => distM(mid, z.center) <= z.radius_m + 6);
     };
@@ -83,8 +88,8 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
     );
   }
 
-  // ---- flood zones ----
-  if (s.layers.flood && s.floodZones.length) {
+  // ---- flood zones (simulation hazards only; Realtime Mode is sensor-driven) ----
+  if (!realtime && s.layers.flood && s.floodZones.length) {
     layers.push(
       new PolygonLayer<FloodZone>({
         id: 'flood',
@@ -111,8 +116,8 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
     );
   }
 
-  // ---- fire hazard zone ----
-  if (hazards.length) {
+  // ---- fire hazard zone (simulation only) ----
+  if (!realtime && hazards.length) {
     layers.push(
       new ScatterplotLayer<Hazard>({
         id: 'hazard-fill',
@@ -383,7 +388,10 @@ export function buildLayers(s: StoreState, t: number, now: number, zoom: number)
         getLineColor: [10, 14, 22, 255],
         lineWidthMinPixels: 1,
         pickable: true,
-        updateTriggers: { getRadius: [Math.round(t / 160), s.nodeState], getFillColor: [s.nodeState] },
+        updateTriggers: {
+          getRadius: [Math.round(t / 160), s.nodeState, s.risks, s.liveState, s.liveRisks, s.mode],
+          getFillColor: [s.nodeState, s.risks, s.liveState, s.liveRisks, s.mode],
+        },
       }),
     );
     if (zoom >= 17.2) {
@@ -432,9 +440,12 @@ export function tooltipFor(info: PickingInfo, s: StoreState) {
   }
   if (info.layer.id === 'sensors') {
     const m = info.object as SensorMeta;
-    const v = s.nodeState[m.node_id]?.values ?? {};
+    const v = (s.mode === 'realtime' ? s.liveState[m.node_id]?.values : s.nodeState[m.node_id]?.values) ?? {};
     const vals = Object.entries(v).map(([k, x]) => `${k} ${x}`).join(', ');
-    return { html: `<b>${m.node_id}</b><br/>${m.label}<br/>${vals}`, style: tipStyle };
+    const risk = s.risks[m.node_id];
+    const sim = m.simulation === false ? '' : '<br/><span style="color:#e8a63c">SIMULATION</span>';
+    const riskLine = risk ? `<br/>Risk <b>${risk.score}</b> (${risk.category})` : '';
+    return { html: `<b>${m.node_id}</b><br/>${m.label}<br/>${vals}${riskLine}${sim}`, style: tipStyle };
   }
   return null;
 }

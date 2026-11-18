@@ -51,7 +51,9 @@ async def patch_incident(incident_id: str, payload: IncidentPatch) -> dict:
         await session.commit()
         out = incident_repo.incident_out(incident)
     for name, data in events:
-        await bus.broadcast_event(name, data)
+        await bus.broadcast_event(
+            name, data, simulation=bool(data.get("simulation", True))
+        )
     return out
 
 

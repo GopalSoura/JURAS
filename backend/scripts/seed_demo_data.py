@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import delete, select
 
 from app.db.session import SessionFactory, engine
+from app.iot.registry import IOT_DEVICE_BY_SENSOR
 from app.models import (
     Building,
     GraphEdge,
@@ -123,6 +124,20 @@ RAIN_SENSORS = [
 ]
 
 
+def sensor_attrs(code: str, base: dict) -> dict:
+    """Add Wokwi device metadata only to the three registered simulation nodes."""
+    device = IOT_DEVICE_BY_SENSOR.get(code)
+    if device is not None:
+        base = {
+            **base,
+            "device_id": device.device_id,
+            "wokwi": True,
+            "simulation": True,
+            "label_data": "Wokwi ESP32 simulation node, not a field sensor",
+        }
+    return base
+
+
 def point_wkt(pos: list[float]) -> str:
     return f"POINT({pos[0]:.8f} {pos[1]:.8f})"
 
@@ -226,7 +241,7 @@ async def seed() -> None:
                 Sensor(
                     code=code, label=label, kind="smoke_temp", building_id=b.id,
                     node_code=None, status="active", source="simulation", pos=pos,
-                    attributes={"label_data": DATA_LABEL}, geom=point_wkt(pos),
+                    attributes=sensor_attrs(code, {"label_data": DATA_LABEL}), geom=point_wkt(pos),
                 )
             )
         for code, bcode, label in STRUCTURE_SENSORS:
@@ -236,7 +251,7 @@ async def seed() -> None:
                 Sensor(
                     code=code, label=label, kind="structure", building_id=b.id,
                     node_code=None, status="active", source="simulation", pos=pos,
-                    attributes={"label_data": DATA_LABEL}, geom=point_wkt(pos),
+                    attributes=sensor_attrs(code, {"label_data": DATA_LABEL}), geom=point_wkt(pos),
                 )
             )
         for code, x, y, label, node_code, factor in RAIN_SENSORS:
@@ -245,7 +260,7 @@ async def seed() -> None:
                 Sensor(
                     code=code, label=label, kind="rain_level", building_id=None,
                     node_code=node_code, status="active", source="simulation", pos=pos,
-                    attributes={"flood_factor": factor, "label_data": DATA_LABEL},
+                    attributes=sensor_attrs(code, {"flood_factor": factor, "label_data": DATA_LABEL}),
                     geom=point_wkt(pos),
                 )
             )

@@ -49,3 +49,10 @@ async def find_for_building(session: AsyncSession, building_id: uuid.UUID, kind:
         select(Sensor).where(Sensor.building_id == building_id, Sensor.kind == kind).limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def find_for_node(session: AsyncSession, node_code: str, kind: str) -> Sensor | None:
+    result = await session.execute(
+        select(Sensor).where(Sensor.node_code == node_code, Sensor.kind == kind).limit(1)
+    )
+    return result.scalar_one_or_none()

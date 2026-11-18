@@ -27,24 +27,37 @@ export function Kpis() {
   const buildings = useStore((s) => s.buildings);
   const sensors = useStore((s) => s.sensors);
   const nodeState = useStore((s) => s.nodeState);
+  const liveState = useStore((s) => s.liveState);
+  const mode = useStore((s) => s.mode);
+  const now = useNow(1000);
 
   const k = useMemo(() => {
     const open = Object.values(alerts).filter(isOpen);
     const bs = Object.values(buildings);
+    const realtime = mode === 'realtime';
+    const hardware = sensors.filter((x) => x.device_id);
+    const onlineSensors = realtime
+      ? hardware.filter((x) => {
+          const item = liveState[x.node_id];
+          if (!item?.values || !Object.keys(item.values).length) return false;
+          const observed = item.observed_at ? Date.parse(item.observed_at) : item.ts;
+          return Number.isFinite(observed) && now - observed <= 30_000;
+        }).length
+      : sensors.filter((x) => nodeState[x.node_id]).length;
     return {
       open: open.length,
       critical: open.filter((a) => a.severity === 'critical').length,
-      online: sensors.filter((x) => nodeState[x.node_id]).length,
-      total: sensors.length,
+      online: onlineSensors,
+      total: realtime ? hardware.length : sensors.length,
       watch: bs.filter((b) => b.status !== 'ok').length,
       totalB: bs.length,
       queue: bs.filter((b) => b.priority >= 65).length,
     };
-  }, [alerts, buildings, sensors, nodeState]);
+  }, [alerts, buildings, sensors, nodeState, liveState, mode, now]);
 
   const tiles = [
     { label: 'Open incidents', value: k.open, sub: `${k.critical} critical`, accent: k.critical ? 'var(--red)' : k.open ? 'var(--amber)' : 'var(--green)' },
-    { label: 'Sensors online', value: `${k.online}/${k.total}`, sub: 'last 5 s', accent: k.online === k.total ? 'var(--green)' : 'var(--amber)' },
+    { label: 'Sensors online', value: `${k.online}/${k.total}`, sub: mode === 'realtime' ? 'fresh Wokwi readings' : 'last 5 s', accent: k.online === k.total ? 'var(--green)' : 'var(--amber)' },
     { label: 'Buildings on watch', value: k.watch, sub: `of ${k.totalB} tracked`, accent: k.watch ? 'var(--amber)' : 'var(--green)' },
     { label: 'Inspection queue', value: k.queue, sub: 'priority 65+', accent: 'var(--accent)' },
   ];
@@ -256,10 +269,39 @@ export function BuildingCard() {
 
 /* ---------------- stormwater ---------------- */
 export function StormCard() {
+  const mode = useStore((s) => s.mode);
   const hist = useStore((s) => s.rainHistory);
   const zones = useStore((s) => s.floodZones);
   const iv = useStore((s) => s.interventions);
+  const sensors = useStore((s) => s.sensors);
+  const liveState = useStore((s) => s.liveState);
+  const realtime = mode === 'realtime';
   const last = hist[hist.length - 1];
+
+  // Realtime Mode reads only live Wokwi stormwater nodes. Missing readings stay
+  // `N/A`; the synthetic rain history and simulation interventions are never
+  // shown as if they were hardware data.
+  const live = useMemo(() => {
+    const ids = sensors.filter((s) => s.kind === 'rain_level').map((s) => s.node_id);
+    const rains: number[] = [];
+    const levels: number[] = [];
+    let reporting = 0;
+    for (const id of ids) {
+      const v = liveState[id]?.values;
+      if (!v || !Object.keys(v).length) continue;
+      reporting += 1;
+      const r = v.rain_mmh;
+      const l = v.level_cm ?? v.water_level_cm;
+      if (typeof r === 'number' && Number.isFinite(r)) rains.push(r);
+      if (typeof l === 'number' && Number.isFinite(l)) levels.push(l);
+    }
+    return {
+      reporting,
+      total: ids.length,
+      rain: rains.length ? Math.max(...rains) : undefined,
+      level: levels.length ? Math.max(...levels) : undefined,
+    };
+  }, [sensors, liveState]);
 
   const option = useMemo<EChartsCoreOption>(
     () => ({
@@ -279,26 +321,48 @@ export function StormCard() {
     [hist],
   );
 
+  const rainText = realtime ? (live.rain === undefined ? 'N/A' : live.rain.toFixed(0)) : (last?.rain ?? 0).toFixed(0);
+  const levelText = realtime ? (live.level === undefined ? 'N/A' : live.level.toFixed(0)) : (last?.level ?? 0).toFixed(0);
+
   return (
-    <Section title="Stormwater" hint="dashed line = tender-blocking depth">
+    <Section
+      title="Stormwater"
+      hint={realtime ? 'live Wokwi storm node · N/A when silent' : 'dashed line = tender-blocking depth'}
+    >
       <div className="mb-1 grid grid-cols-3 gap-2 text-[10.5px]">
         <div>
           <div className="text-dim">Rainfall</div>
-          <div className="num font-mono text-[14px]">{(last?.rain ?? 0).toFixed(0)} <span className="text-[10.5px] text-dim">mm/h</span></div>
+          <div className="num font-mono text-[14px]">
+            {rainText}
+            {rainText !== 'N/A' && <span className="text-[10.5px] text-dim"> mm/h</span>}
+          </div>
         </div>
         <div>
           <div className="text-dim">Peak level</div>
-          <div className="num font-mono text-[14px]">{(last?.level ?? 0).toFixed(0)} <span className="text-[10.5px] text-dim">cm</span></div>
+          <div className="num font-mono text-[14px]">
+            {levelText}
+            {levelText !== 'N/A' && <span className="text-[10.5px] text-dim"> cm</span>}
+          </div>
         </div>
         <div>
-          <div className="text-dim">Flooded lanes</div>
-          <div className="num font-mono text-[14px]">{zones.length}</div>
+          <div className="text-dim">{realtime ? 'Live nodes' : 'Flooded lanes'}</div>
+          <div className="num font-mono text-[14px]">{realtime ? `${live.reporting}/${live.total}` : zones.length}</div>
         </div>
       </div>
-      <Chart option={option} height={112} />
+      {realtime ? (
+        <div className="grid place-items-center border border-line bg-panel2 py-6 text-center text-[11px] leading-snug text-dim">
+          Realtime Mode shows live Wokwi readings only.
+          <br />
+          Simulated rain history is hidden.
+        </div>
+      ) : (
+        <Chart option={option} height={112} />
+      )}
       <div className="mt-2">
         <div className="label mb-1">Suggested interventions</div>
-        {iv.length === 0 ? (
+        {realtime ? (
+          <p className="text-[11.5px] text-dim">Simulation-derived interventions are hidden in Realtime Mode.</p>
+        ) : iv.length === 0 ? (
           <p className="text-[11.5px] text-dim">No waterlogging now. Ranked fixes appear once a hotspot forms.</p>
         ) : (
           <ol className="space-y-1">

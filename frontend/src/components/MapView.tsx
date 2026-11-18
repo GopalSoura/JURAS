@@ -20,11 +20,15 @@ interface Want { pos: LonLat; cls: string; html: string; anchor: 'bottom' | 'cen
 function syncMarkers(map: mapboxgl.Map, markers: Map<string, mapboxgl.Marker>, s: StoreState) {
   const want = new Map<string, Want>();
   for (const a of Object.values(s.alerts)) {
-    if (a.module !== 'fire' || !isOpen(a)) continue;
+    if (!isOpen(a)) continue;
+    if (a.module !== 'fire' && !a.realtime) continue;
+    const label = a.module === 'fire'
+      ? a.severity === 'critical' ? 'Fire' : 'Possible fire'
+      : a.module === 'structure' ? 'Structural' : a.module === 'flood' ? 'Flood' : 'Risk';
     want.set(`inc-${a.id}`, {
       pos: a.pos,
       cls: a.severity === 'critical' ? 'mk-incident' : 'mk-incident sev-high',
-      html: `${FLAME_SVG}<span>${a.severity === 'critical' ? 'Fire' : 'Possible fire'} ${Math.round(a.confidence * 100)}%</span>`,
+      html: `${FLAME_SVG}<span>${label} ${Math.round(a.confidence * 100)}%</span>`,
       anchor: 'bottom',
     });
   }

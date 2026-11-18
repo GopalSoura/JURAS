@@ -12,7 +12,9 @@ const BTN: { name: 'fire' | 'crack' | 'flood' | 'reset'; label: string; icon: Ic
 
 export function SimBar({ className = '' }: { className?: string }) {
   const status = useStore((s) => s.feedStatus);
+  const mode = useStore((s) => s.mode);
   const run = (name: Extract<ClientCmd, { cmd: 'scenario' }>['name']) => feed.send({ cmd: 'scenario', name });
+  if (mode === 'realtime') return null;
   return (
     <div className={`panel absolute left-3 top-3 z-10 max-w-[calc(100%-5rem)] p-1.5 ${className}`}>
       <div className="mb-1 flex items-center gap-1.5 px-0.5">

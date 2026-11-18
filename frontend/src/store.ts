@@ -1,8 +1,9 @@
 import { create } from 'zustand';
 import type {
-  Alert, Building, FeedStatus, FloodZone, Hazard, Intervention, LaneEdge, LaneNode, ModuleId, NavClosure, NavDepartment, NavOrigin, NavOriginMode, NavProfile, NavResponse, NavStation, Route, SensorKind, SensorMeta, ServerMsg, Telemetry,
+  Alert, Building, FeedStatus, FloodZone, Hazard, Intervention, LaneEdge, LaneNode, ModuleId, NavClosure, NavDepartment, NavOrigin, NavOriginMode, NavProfile, NavResponse, NavStation, RiskState, Route, SensorKind, SensorMeta, ServerMsg, Telemetry, ViewMode,
 } from './types';
 import { safetyScore } from './lib/metrics';
+import { mergeLiveTelemetry, mergeRisks, mergeTelemetry } from './lib/live';
 import {
   clearClosures,
   createClosure,
@@ -30,18 +31,30 @@ function defaultNavOrigin(s: StoreState): NavOrigin | null {
 
 export interface StoreState {
   ready: boolean;
+  mode: ViewMode;
   buildings: Record<string, Building>;
   laneNodes: LaneNode[];
   laneEdges: LaneEdge[];
   sensors: SensorMeta[];
   nodeState: Record<string, Telemetry>;
+  liveState: Record<string, Telemetry>;
+  risks: Record<string, RiskState>;
+  liveRisks: Record<string, RiskState>;
   alerts: Record<string, Alert>;
+  simAlerts: Record<string, Alert>;
+  liveAlerts: Record<string, Alert>;
+  simBuildings: Record<string, Building>;
+  liveBuildings: Record<string, Building>;
   routes: Record<string, Route[]>;
   hazards: Record<string, Hazard>;
   floodZones: FloodZone[];
   interventions: Intervention[];
   log: LogLine[];
+  simLog: LogLine[];
+  liveLog: LogLine[];
   riskHistory: { ts: number; score: number }[];
+  simRiskHistory: { ts: number; score: number }[];
+  liveRiskHistory: { ts: number; score: number }[];
   rainHistory: { ts: number; rain: number; level: number }[];
 
   selectedAlert: string | null;
@@ -70,6 +83,7 @@ export interface StoreState {
   selectAlert: (id: string | null) => void;
   selectBuilding: (id: string | null) => void;
   setModule: (m: ModuleId) => void;
+  setMode: (m: ViewMode) => void;
   toggleLayer: (k: keyof Layers) => void;
   setFeed: (status: FeedStatus, label: string) => void;
   sample: () => void;
@@ -89,27 +103,68 @@ export interface StoreState {
 
 const fmt = (t: Telemetry): LogLine => {
   const v = t.values;
-  if (t.kind === 'smoke_temp') return { ts: t.ts, kind: t.kind, hot: v.smoke_ppm > 120 || v.temp_c > 45, text: `${t.node_id}  smoke ${v.smoke_ppm} ppm  ${v.temp_c.toFixed(1)} °C` };
-  if (t.kind === 'structure') return { ts: t.ts, kind: t.kind, hot: v.tilt_deg >= 0.45 || v.crack_mm >= 0.55, text: `${t.node_id}  tilt ${v.tilt_deg.toFixed(2)}°  crack ${v.crack_mm.toFixed(2)} mm` };
-  return { ts: t.ts, kind: t.kind, hot: v.level_cm >= 3, text: `${t.node_id}  rain ${v.rain_mmh.toFixed(0)} mm/h  level ${v.level_cm.toFixed(0)} cm` };
+  const num = (x: number | undefined): number | undefined =>
+    typeof x === 'number' && Number.isFinite(x) ? x : undefined;
+  const fixed = (x: number | undefined, d: number): string =>
+    x === undefined ? 'N/A' : x.toFixed(d);
+  if (t.kind === 'smoke_temp') {
+    const ppm = num(v.smoke_ppm);
+    const temp = num(v.temp_c ?? v.temperature_c);
+    return {
+      ts: t.ts,
+      kind: t.kind,
+      hot: (ppm ?? 0) > 120 || (temp ?? 0) > 45,
+      text: `${t.node_id}  smoke ${ppm === undefined ? 'N/A' : ppm} ppm  ${fixed(temp, 1)} °C`,
+    };
+  }
+  if (t.kind === 'structure') {
+    const tilt = num(v.tilt_deg);
+    const crack = num(v.crack_mm);
+    return {
+      ts: t.ts,
+      kind: t.kind,
+      hot: (tilt ?? 0) >= 0.45 || (crack ?? 0) >= 0.55,
+      text: `${t.node_id}  tilt ${fixed(tilt, 2)}°  crack ${fixed(crack, 2)} mm`,
+    };
+  }
+  const level = num(v.level_cm ?? v.water_level_cm);
+  const rain = num(v.rain_mmh);
+  return {
+    ts: t.ts,
+    kind: t.kind,
+    hot: (level ?? 0) >= 3,
+    text: `${t.node_id}  rain ${fixed(rain, 0)} mm/h  level ${fixed(level, 0)} cm`,
+  };
 };
 
 let batch = 0;
 
 export const useStore = create<StoreState>()((set, get) => ({
   ready: false,
+  mode: 'simulation',
   buildings: {},
+  simBuildings: {},
+  liveBuildings: {},
   laneNodes: [],
   laneEdges: [],
   sensors: [],
   nodeState: {},
+  liveState: {},
+  risks: {},
+  liveRisks: {},
   alerts: {},
+  simAlerts: {},
+  liveAlerts: {},
   routes: {},
   hazards: {},
   floodZones: [],
   interventions: [],
   log: [],
+  simLog: [],
+  liveLog: [],
   riskHistory: [],
+  simRiskHistory: [],
+  liveRiskHistory: [],
   rainHistory: [],
   selectedAlert: null,
   selectedBuilding: null,
@@ -134,32 +189,58 @@ export const useStore = create<StoreState>()((set, get) => ({
 
   apply: (m) => {
     switch (m.t) {
-      case 'snapshot':
+      case 'snapshot': {
+        const simBuildings = Object.fromEntries(m.buildings.map((b) => [b.id, b]));
+        const liveBuildings = { ...simBuildings };
+        for (const [id, patch] of Object.entries(m.live_building_patches ?? {})) {
+          const b = liveBuildings[id];
+          if (b) liveBuildings[id] = { ...b, ...patch };
+        }
+        const simAlerts: Record<string, Alert> = {};
+        const liveAlerts: Record<string, Alert> = {};
+        for (const a of m.alerts) (a.realtime ? liveAlerts : simAlerts)[a.id] = a;
+        const mode = get().mode;
         set({
           ready: true,
-          buildings: Object.fromEntries(m.buildings.map((b) => [b.id, b])),
+          simBuildings,
+          liveBuildings,
+          buildings: mode === 'realtime' ? liveBuildings : simBuildings,
           laneNodes: m.lane_nodes,
           laneEdges: m.lane_edges,
           sensors: m.sensors,
-          alerts: Object.fromEntries(m.alerts.map((a) => [a.id, a])),
+          simAlerts,
+          liveAlerts,
+          alerts: mode === 'realtime' ? liveAlerts : simAlerts,
           routes: m.routes,
           hazards: Object.fromEntries(m.hazards.map((h) => [h.id, h])),
           floodZones: m.flood_zones,
           interventions: m.interventions,
-          nodeState: {},
+          nodeState: mergeTelemetry({}, m.telemetry ?? []),
+          liveState: mergeLiveTelemetry({}, m.telemetry ?? []),
+          risks: mergeRisks({}, m.risks ?? []),
+          liveRisks: mergeRisks({}, m.live_risks ?? []),
           selectedAlert: null,
           selectedBuilding: null,
         });
         break;
+      }
+      case 'live': {
+        const liveLog = [...m.items.map(fmt).reverse(), ...get().liveLog].slice(0, 40);
+        set({
+          liveState: mergeLiveTelemetry(get().liveState, m.items),
+          liveLog,
+          ...(get().mode === 'realtime' ? { log: liveLog } : {}),
+        });
+        break;
+      }
       case 'telemetry': {
-        const nodeState = { ...get().nodeState };
-        for (const i of m.items) nodeState[i.node_id] = i;
+        const nodeState = mergeTelemetry(get().nodeState, m.items);
         const lines = m.items.map(fmt);
         const hot = lines.filter((l) => l.hot);
         const calm = lines.filter((l) => !l.hot);
         batch++;
         const pick = [...hot.slice(0, 4), calm[batch % Math.max(1, calm.length)]].filter(Boolean);
-        const log = [...pick.reverse(), ...get().log].slice(0, 40);
+        const simLog = [...pick.reverse(), ...get().simLog].slice(0, 40);
         const rainNodes = m.items.filter((i) => i.kind === 'rain_level');
         let rainHistory = get().rainHistory;
         if (rainNodes.length) {
@@ -167,17 +248,48 @@ export const useStore = create<StoreState>()((set, get) => ({
           const level = Math.max(...rainNodes.map((i) => i.values.level_cm));
           rainHistory = [...rainHistory, { ts: m.items[0].ts, rain, level }].slice(-90);
         }
-        set({ nodeState, log, rainHistory });
+        set({
+          nodeState,
+          simLog,
+          rainHistory,
+          ...(get().mode === 'simulation' ? { log: simLog } : {}),
+        });
         break;
       }
+      case 'risk':
+        if (m.risk.realtime) set({ liveRisks: mergeRisks(get().liveRisks, m.risk) });
+        else set({ risks: mergeRisks(get().risks, m.risk) });
+        break;
       case 'building': {
-        const b = get().buildings[m.id];
-        if (b) set({ buildings: { ...get().buildings, [m.id]: { ...b, ...m.patch } } });
+        const realtime = Boolean(m.realtime);
+        const simBuildings = get().simBuildings;
+        const liveBuildings = get().liveBuildings;
+        const source = realtime ? liveBuildings : simBuildings;
+        const b = source[m.id];
+        if (!b) break;
+        const updated = { ...b, ...m.patch };
+        const nextSim = realtime ? simBuildings : { ...simBuildings, [m.id]: updated };
+        const nextLive = realtime ? { ...liveBuildings, [m.id]: updated } : liveBuildings;
+        set({
+          simBuildings: nextSim,
+          liveBuildings: nextLive,
+          buildings: get().mode === 'realtime' ? nextLive : nextSim,
+        });
         break;
       }
-      case 'alert':
-        set({ alerts: { ...get().alerts, [m.alert.id]: m.alert } });
+      case 'alert': {
+        const realtime = Boolean(m.alert.realtime);
+        const simAlerts = get().simAlerts;
+        const liveAlerts = get().liveAlerts;
+        const nextSim = realtime ? simAlerts : { ...simAlerts, [m.alert.id]: m.alert };
+        const nextLive = realtime ? { ...liveAlerts, [m.alert.id]: m.alert } : liveAlerts;
+        set({
+          simAlerts: nextSim,
+          liveAlerts: nextLive,
+          alerts: get().mode === 'realtime' ? nextLive : nextSim,
+        });
         break;
+      }
       case 'routes': {
         const routes = { ...get().routes };
         if (m.routes.length) routes[m.alert_id] = m.routes;
@@ -201,11 +313,36 @@ export const useStore = create<StoreState>()((set, get) => ({
   },
   selectBuilding: (id) => set({ selectedBuilding: id }),
   setModule: (module) => set({ module }),
+  setMode: (mode) => {
+    const s = get();
+    if (mode === s.mode) return;
+    // Swap only the mode-specific views. Nav state, map instance, origin,
+    // destination, zoom and centre are deliberately left untouched.
+    const alerts = mode === 'realtime' ? s.liveAlerts : s.simAlerts;
+    const buildings = mode === 'realtime' ? s.liveBuildings : s.simBuildings;
+    set({
+      mode,
+      alerts,
+      buildings,
+      log: mode === 'realtime' ? s.liveLog : s.simLog,
+      riskHistory: mode === 'realtime' ? s.liveRiskHistory : s.simRiskHistory,
+      selectedAlert: s.selectedAlert && alerts[s.selectedAlert] ? s.selectedAlert : null,
+      selectedBuilding: s.selectedBuilding && buildings[s.selectedBuilding] ? s.selectedBuilding : null,
+    });
+  },
   toggleLayer: (k) => set({ layers: { ...get().layers, [k]: !get().layers[k] } }),
   setFeed: (feedStatus, feedLabel) => set({ feedStatus, feedLabel }),
   sample: () => {
-    const score = safetyScore(get().alerts);
-    set({ riskHistory: [...get().riskHistory, { ts: Date.now(), score }].slice(-90) });
+    const s = get();
+    const score = safetyScore(s.alerts);
+    const point = { ts: Date.now(), score };
+    if (s.mode === 'realtime') {
+      const liveRiskHistory = [...s.liveRiskHistory, point].slice(-90);
+      set({ liveRiskHistory, riskHistory: liveRiskHistory });
+    } else {
+      const simRiskHistory = [...s.simRiskHistory, point].slice(-90);
+      set({ simRiskHistory, riskHistory: simRiskHistory });
+    }
   },
 
   setNavOrigin: (navOrigin) => {

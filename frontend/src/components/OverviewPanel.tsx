@@ -2,15 +2,16 @@ import type { ReactNode } from 'react';
 import { useStore } from '../store';
 import type { ModuleId } from '../types';
 import { BuildingCard, FeedCard, Kpis, RoutesCard, SafetyCard, StormCard } from './cards';
+import { FireNodeCard, StructuralNodeCard, StormNodeCard } from './IoTCards';
 import { NavigationCard } from './NavigationCard';
 
 const ORDER: Record<ModuleId, ReactNode[]> = {
-  overview: [<Kpis key="k" />, <NavigationCard key="n" />, <RoutesCard key="r" />, <SafetyCard key="s" />, <BuildingCard key="b" />, <StormCard key="w" />, <FeedCard key="f" />],
-  fire: [<NavigationCard key="n" />, <RoutesCard key="r" />, <Kpis key="k" />, <SafetyCard key="s" />, <FeedCard key="f" />],
-  structure: [<BuildingCard key="b" />, <Kpis key="k" />, <SafetyCard key="s" />, <FeedCard key="f" />],
-  flood: [<StormCard key="w" />, <RoutesCard key="r" />, <Kpis key="k" />, <FeedCard key="f" />],
+  overview: [<Kpis key="k" />, <FireNodeCard key="if" />, <StructuralNodeCard key="is" />, <StormNodeCard key="iw" />, <NavigationCard key="n" />, <RoutesCard key="r" />, <SafetyCard key="s" />, <BuildingCard key="b" />, <StormCard key="w" />, <FeedCard key="f" />],
+  fire: [<FireNodeCard key="if" />, <NavigationCard key="n" />, <RoutesCard key="r" />, <Kpis key="k" />, <SafetyCard key="s" />, <FeedCard key="f" />],
+  structure: [<StructuralNodeCard key="is" />, <BuildingCard key="b" />, <Kpis key="k" />, <SafetyCard key="s" />, <FeedCard key="f" />],
+  flood: [<StormNodeCard key="iw" />, <StormCard key="w" />, <RoutesCard key="r" />, <Kpis key="k" />, <FeedCard key="f" />],
   routing: [<NavigationCard key="n" />, <RoutesCard key="r" />, <StormCard key="w" />, <Kpis key="k" />],
-  sensors: [<FeedCard key="f" />, <Kpis key="k" />, <StormCard key="w" />, <BuildingCard key="b" />],
+  sensors: [<FireNodeCard key="if" />, <StructuralNodeCard key="is" />, <StormNodeCard key="iw" />, <FeedCard key="f" />, <Kpis key="k" />, <StormCard key="w" />, <BuildingCard key="b" />],
 };
 
 export function OverviewPanel({ className = '' }: { className?: string }) {

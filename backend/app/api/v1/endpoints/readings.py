@@ -74,5 +74,8 @@ async def create_reading(payload: ReadingCreate) -> dict:
         await session.commit()
     events = result.pop("events", [])
     for name, data in events:
-        await bus.broadcast_event(name, data)
+        # The envelope flag must match the stored reading.  Incident payloads
+        # carry no simulation key, so fall back to the reading's flag.
+        event_simulation = bool(data.get("simulation", result.get("simulation", True)))
+        await bus.broadcast_event(name, data, simulation=event_simulation)
     return result

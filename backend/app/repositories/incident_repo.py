@@ -82,6 +82,7 @@ async def events_for(session: AsyncSession, incident_id: uuid.UUID) -> list[Inci
 
 
 def incident_out(i: Incident) -> dict[str, Any]:
+    last_update = i.resolved_at or i.acknowledged_at or i.opened_at
     return {
         "id": str(i.id),
         "code": i.code,
@@ -93,10 +94,12 @@ def incident_out(i: Incident) -> dict[str, Any]:
         "title": i.title,
         "description": i.description,
         "source": i.source,
+        "simulation": i.source == "simulation" or i.simulation_id is not None,
         "simulation_id": str(i.simulation_id) if i.simulation_id else None,
         "opened_at": i.opened_at.isoformat(),
         "acknowledged_at": i.acknowledged_at.isoformat() if i.acknowledged_at else None,
         "resolved_at": i.resolved_at.isoformat() if i.resolved_at else None,
+        "last_update": last_update.isoformat() if last_update else None,
         "pos": i.pos,
     }
 

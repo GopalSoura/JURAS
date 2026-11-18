@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "author": "JURAS",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-hc-sr04", "id": "sonar1", "top": -140, "left": 250, "attrs": { "distance": "400" } },
+    { "type": "wokwi-photoresistor-sensor", "id": "rain1", "top": 60, "left": 220, "attrs": { "lux": "500", "threshold": "2.5" } },
+    { "type": "wokwi-dht22", "id": "dht1", "top": 260, "left": 250, "attrs": { "temperature": "28", "humidity": "80" } },
+    { "type": "wokwi-led", "id": "led_red", "top": -20, "left": 480, "attrs": { "color": "red", "label": "RED" } },
+    { "type": "wokwi-resistor", "id": "r_red", "top": 10, "left": 420, "attrs": { "value": "220" } },
+    { "type": "wokwi-buzzer", "id": "buzzer1", "top": 140, "left": 480, "attrs": { "volume": "0.1" } }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "sonar1:VCC", "esp:5V", "red", [] ],
+    [ "sonar1:TRIG", "esp:5", "green", [] ],
+    [ "sonar1:ECHO", "esp:18", "blue", [] ],
+    [ "sonar1:GND", "esp:GND.1", "black", [] ],
+    [ "rain1:VCC", "esp:3V3", "red", [] ],
+    [ "rain1:AO", "esp:34", "green", [] ],
+    [ "rain1:GND", "esp:GND.2", "black", [] ],
+    [ "dht1:VCC", "esp:3V3", "red", [] ],
+    [ "dht1:SDA", "esp:4", "green", [] ],
+    [ "dht1:GND", "esp:GND.3", "black", [] ],
+    [ "led_red:A", "r_red:1", "red", [] ],
+    [ "r_red:2", "esp:26", "red", [] ],
+    [ "led_red:C", "esp:GND.1", "black", [] ],
+    [ "buzzer1:1", "esp:GND.2", "black", [] ],
+    [ "buzzer1:2", "esp:27", "red", [] ]
+  ],
+  "dependencies": {}
+}

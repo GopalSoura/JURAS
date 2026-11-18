@@ -10,7 +10,8 @@ export type AlertModule = 'fire' | 'structure' | 'flood' | 'map';
 export type BuildingStatus = 'ok' | 'watch' | 'inspect' | 'fire';
 export type SensorKind = 'smoke_temp' | 'structure' | 'rain_level';
 export type Profile = 'fire_truck' | 'medical' | 'evacuation';
-export type FeedStatus = 'connecting' | 'live' | 'sim' | 'offline';
+export type FeedStatus = 'connecting' | 'live' | 'sim' | 'reconnecting' | 'offline';
+export type ViewMode = 'simulation' | 'realtime';
 
 /* ---------- real OSM navigation (backend /api/v1/routes/navigate) ---------- */
 export type NavProfile = 'fire_truck' | 'responder_bike' | 'walking';
@@ -129,6 +130,26 @@ export interface SensorMeta {
   pos: LonLat;
   label: string;
   building_id?: string;
+  node_code?: string | null;
+  device_id?: string | null;
+  source?: string;
+  simulation?: boolean;
+}
+
+export interface RiskState {
+  sensor_code?: string;
+  device_id?: string | null;
+  hazard: 'fire' | 'flood' | 'structural';
+  entity_type: 'building' | 'node';
+  entity_code: string;
+  building_code?: string | null;
+  node_code?: string | null;
+  score: number;
+  category: 'normal' | 'low' | 'warning' | 'high' | 'critical';
+  reasons?: { rule: string; text: string }[];
+  assessed_at: string;
+  simulation?: boolean;
+  realtime?: boolean;
 }
 
 export interface Telemetry {
@@ -137,6 +158,17 @@ export interface Telemetry {
   ts: number;
   battery: number;
   values: Record<string, number>;
+  sim_values?: Record<string, number>;
+  live_values?: Record<string, number>;
+  device_id?: string | null;
+  source?: string;
+  simulation?: boolean;
+  realtime?: boolean;
+  live?: boolean;
+  stale?: boolean;
+  observed_at?: string | null;
+  risk?: Pick<RiskState, 'score' | 'category' | 'hazard' | 'assessed_at'>;
+  live_risk?: Pick<RiskState, 'score' | 'category' | 'hazard' | 'assessed_at'>;
 }
 
 export interface Source {
@@ -153,12 +185,17 @@ export interface Alert {
   title: string;
   detail: string;
   building_id?: string;
+  node_code?: string | null;
+  target?: string;
   pos: LonLat;
   confidence: number; // 0-1
   sources: Source[];
   created_at: number;
   updated_at: number;
+  last_update?: string | null;
   dispatched_at?: number;
+  simulation?: boolean;
+  realtime?: boolean;
   recommendation?: string;
 }
 
@@ -212,6 +249,10 @@ export type ServerMsg =
       lane_nodes: LaneNode[];
       lane_edges: LaneEdge[];
       sensors: SensorMeta[];
+      telemetry?: Telemetry[];
+      risks?: RiskState[];
+      live_risks?: RiskState[];
+      live_building_patches?: Record<string, Partial<Building>>;
       alerts: Alert[];
       routes: Record<string, Route[]>;
       hazards: Hazard[];
@@ -219,7 +260,9 @@ export type ServerMsg =
       interventions: Intervention[];
     }
   | { t: 'telemetry'; items: Telemetry[] }
-  | { t: 'building'; id: string; patch: Partial<Building> }
+  | { t: 'live'; items: Telemetry[] }
+  | { t: 'risk'; risk: RiskState }
+  | { t: 'building'; id: string; patch: Partial<Building>; realtime?: boolean }
   | { t: 'alert'; alert: Alert }
   | { t: 'routes'; alert_id: string; routes: Route[] }
   | { t: 'hazard'; hazard: Hazard }

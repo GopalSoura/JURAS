@@ -60,6 +60,7 @@ async def upsert_for_risk(
     source: str,
     reasons: list[dict[str, Any]],
     events_out: list[tuple[str, dict[str, Any]]],
+    realtime: bool = False,
 ) -> tuple[Incident | None, bool]:
     if category not in (RiskCategory.high.value, RiskCategory.critical.value):
         return None, False
@@ -83,7 +84,11 @@ async def upsert_for_risk(
                 ),
             )
             events_out.append(
-                ("incident.updated", incident_repo.incident_out(existing) | {"escalated": True})
+                (
+                    "incident.updated",
+                    incident_repo.incident_out(existing)
+                    | {"escalated": True, "realtime": realtime},
+                )
             )
         return existing, False
     code = await _next_code(session, hazard, target)
@@ -115,7 +120,7 @@ async def upsert_for_risk(
             note=title,
         ),
     )
-    events_out.append(("incident.created", incident_repo.incident_out(incident)))
+    events_out.append(("incident.created", incident_repo.incident_out(incident) | {"realtime": realtime}))
     return incident, True
 
 
@@ -181,5 +186,10 @@ async def transition(
             note=note,
         ),
     )
-    events_out.append(("incident.updated", incident_repo.incident_out(incident)))
+    events_out.append(
+        (
+            "incident.resolved" if new_status == IncidentStatus.resolved.value else "incident.updated",
+            incident_repo.incident_out(incident),
+        )
+    )
     return incident

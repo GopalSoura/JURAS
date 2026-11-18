@@ -1,7 +1,10 @@
+import logging
 import uuid
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger("juras.errors")
 
 
 class AppError(Exception):
@@ -50,4 +53,5 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
 
 
 async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
     return error_response(500, "INTERNAL_ERROR", "Unexpected server error")

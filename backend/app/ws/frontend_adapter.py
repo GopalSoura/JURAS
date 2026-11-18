@@ -10,8 +10,9 @@ from fastapi import WebSocket
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
-from app.models import Building, Lane, LaneNode, Sensor, Incident, IncidentEvent
+from app.models import Building, Lane, LaneNode, Sensor, Incident, IncidentEvent, Reading
 from app.core.constants import IncidentStatus, Hazard
+from app.iot.registry import IOT_DEVICES, device_for_sensor_code
 from app.repositories import building_repo, incident_repo
 from app.services import incident_service
 from app.services.navigation_service import lane_inputs
@@ -26,6 +27,19 @@ M_LAT = 110574.0
 M_LON = 111320.0 * 0.84119298
 
 FLOOD_FACTOR_DEFAULT = 0.5
+
+# A Wokwi node posts every 2-3 s.  Values older than this fall back to the
+# synthetic demo feed so a dead node is visible instead of frozen.
+LIVE_TTL_MS = 30_000.0
+
+RISK_MODULE = {"fire": "fire", "flood": "flood", "structural": "structure"}
+STATUS_TO_ALERT = {
+    "open": "new",
+    "acknowledged": "ack",
+    "resolved": "resolved",
+    "false_alarm": "resolved",
+}
+SEVERITY_CONFIDENCE = {"critical": 0.95, "high": 0.8, "medium": 0.6, "low": 0.4}
 
 INTERVENTION_DEFS = [
     {"id": "IV-1", "name": "Rain garden and bioswale", "where": "Open plot near Junction I", "pos": None, "reduces_pct": 28, "cost_lakh": 6},
@@ -66,6 +80,10 @@ class FrontendWorld:
         self.graph: Graph | None = None
         self.osm_graph = None
         self.alerts: dict[str, dict[str, Any]] = {}
+        # Baseline incidents loaded from the database at startup.  A
+        # Simulation Mode reset restores these so seeded incidents can never
+        # disappear from the dashboard.
+        self.seed_alerts: dict[str, dict[str, Any]] = {}
         self.routes: dict[str, list[dict[str, Any]]] = {}
         self.hazards: dict[str, dict[str, Any]] = {}
         self.zones: list[dict[str, Any]] = []
@@ -79,6 +97,10 @@ class FrontendWorld:
         self.levels: dict[str, float] = {}
         self.battery: dict[str, float] = {}
         self.zone_key = ""
+        self.live_readings: dict[str, dict[str, Any]] = {}
+        self.risks: dict[str, dict[str, Any]] = {}
+        self.live_risks: dict[str, dict[str, Any]] = {}
+        self.live_building_patches: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
         self._load_lock = asyncio.Lock()
         self._telemetry_task: asyncio.Task | None = None
@@ -162,6 +184,7 @@ class FrontendWorld:
                 lane for lane in lane_rows if (lane.attributes or {}).get("source") == "osm"
             ]
             self.osm_graph = build_navigation_graph(lane_inputs(osm_lanes)) if osm_lanes else None
+            sensor_rows = list(sensors.scalars().all())
             self.sensors = [
                 {
                     "node_id": s.code,
@@ -170,18 +193,61 @@ class FrontendWorld:
                     "label": s.label,
                     "building_id": self.building_by_id.get(str(s.building_id)) if s.building_id else None,
                     "node_code": s.node_code,
+                    "device_id": (device_for_sensor_code(s.code).device_id if device_for_sensor_code(s.code) else None),
+                    "source": s.source,
+                    "simulation": s.source == "simulation" or device_for_sensor_code(s.code) is not None,
                     "flood_factor": float((s.attributes or {}).get("flood_factor", FLOOD_FACTOR_DEFAULT)),
                 }
-                for s in sensors.scalars().all()
+                for s in sensor_rows
             ]
             self.levels = {s["node_id"]: 0.0 for s in self.sensors if s["kind"] == "rain_level"}
             self.battery = {s["node_id"]: 72.0 + random.random() * 24.0 for s in self.sensors}
+            # Restore the most recent hardware readings so Realtime Mode shows
+            # the last known values (marked stale by age) after a backend restart.
+            device_codes = {
+                s["node_id"]: s for s in self.sensors if s.get("device_id") in IOT_DEVICES
+            }
+            if device_codes:
+                rows = {str(s.id): s for s in sensor_rows if s.code in device_codes}
+                recent = (
+                    await session.execute(
+                        select(Reading)
+                        .where(
+                            Reading.simulation_id.is_(None),
+                            Reading.sensor_id.in_([s.id for s in rows.values()]),
+                        )
+                        .order_by(Reading.observed_at.desc())
+                        .limit(60)
+                    )
+                ).scalars().all()
+                self.live_readings = {}
+                for r in recent:
+                    sensor_row = rows.get(str(r.sensor_id))
+                    if sensor_row is None or sensor_row.code in self.live_readings:
+                        continue
+                    meta = device_codes[sensor_row.code]
+                    self.live_readings[sensor_row.code] = {
+                        "device_id": meta.get("device_id"),
+                        "values": self._normalize_live_values(meta.get("kind"), r.values or {}),
+                        "source": r.source,
+                        "simulation": r.simulation,
+                        "observed_at": r.observed_at.isoformat(),
+                        "ts": r.observed_at.timestamp() * 1000.0,
+                    }
+            self.live_building_patches = {}
             incidents = await incident_repo.list_incidents(session)
             for i in incidents:
                 if i.status in (IncidentStatus.open.value, IncidentStatus.acknowledged.value):
                     self.alerts[i.code] = self._alert_from_incident(i)
                 elif i.status == IncidentStatus.resolved.value and i.code not in self.alerts:
                     self.alerts.setdefault(i.code, self._alert_from_incident(i))
+            # Snapshot the database incidents so `reset_world` can always
+            # restore them into Simulation Mode.
+            self.seed_alerts = {
+                code: dict(alert)
+                for code, alert in self.alerts.items()
+                if not alert.get("realtime")
+            }
             for iv in INTERVENTION_DEFS:
                 iv["pos"] = self._pos_for_intervention(iv["where"])
             self.interventions = []
@@ -200,9 +266,10 @@ class FrontendWorld:
         ]
 
     def _alert_from_incident(self, i: Incident) -> dict[str, Any]:
-        module = {"fire": "fire", "flood": "flood", "structural": "structure"}.get(i.hazard, "map")
-        status = {"open": "new", "acknowledged": "ack", "resolved": "resolved"}.get(i.status, "new")
+        module = RISK_MODULE.get(i.hazard, "map")
+        status = STATUS_TO_ALERT.get(i.status, "new")
         bcode = self.building_by_id.get(str(i.building_id)) if i.building_id else None
+        last_update = i.resolved_at or i.acknowledged_at or i.opened_at
         return {
             "id": i.code,
             "module": module,
@@ -211,13 +278,34 @@ class FrontendWorld:
             "title": i.title,
             "detail": i.description[:180],
             "building_id": bcode,
+            "node_code": i.node_code,
+            "target": bcode or i.node_code or "area",
             "pos": i.pos,
-            "confidence": 0.7,
+            "confidence": SEVERITY_CONFIDENCE.get(i.severity, 0.6),
             "sources": [],
             "created_at": i.opened_at.timestamp() * 1000.0,
-            "updated_at": (i.acknowledged_at or i.opened_at).timestamp() * 1000.0,
+            "updated_at": last_update.timestamp() * 1000.0,
+            "last_update": last_update.isoformat(),
+            "simulation": i.source == "simulation" or i.simulation_id is not None,
+            # Incidents loaded from the database are Simulation Mode state.
+            # Live/Realtime alerts are only the in-session RT-* alerts created
+            # from an explicitly realtime risk event.
+            "realtime": False,
             "recommendation": None,
         }
+
+    def _incident_realtime(
+        self, data: dict[str, Any], bcode: str | None, node_code: str | None
+    ) -> bool:
+        # Events emitted by the reading service now carry this flag explicitly.
+        # An explicit False must win so simulation incidents at the same
+        # building never move into the realtime namespace merely because a
+        # Wokwi node is also reporting nearby.
+        if "realtime" in data:
+            return bool(data["realtime"])
+        if data.get("device_id") in IOT_DEVICES:
+            return True
+        return False
 
     async def build_snapshot(self) -> dict[str, Any]:
         return {
@@ -232,9 +320,26 @@ class FrontendWorld:
                 for e in self.graph_edges()
             ],
             "sensors": [
-                {k: s[k] for k in ("node_id", "kind", "pos", "label", "building_id")}
+                {
+                    k: s.get(k)
+                    for k in (
+                        "node_id",
+                        "kind",
+                        "pos",
+                        "label",
+                        "building_id",
+                        "node_code",
+                        "device_id",
+                        "source",
+                        "simulation",
+                    )
+                }
                 for s in self.sensors
             ],
+            "telemetry": self._telemetry(),
+            "risks": list(self.risks.values()),
+            "live_risks": list(self.live_risks.values()),
+            "live_building_patches": self.live_building_patches,
             "alerts": list(self.alerts.values()),
             "routes": dict(self.routes),
             "hazards": [h for h in self.hazards.values() if h.get("active", True)],
@@ -266,73 +371,306 @@ class FrontendWorld:
                         self.cracks[bcode] = now_ms()
                 elif scenario == "flood":
                     self.flood_t0 = now_ms()
-            elif name == "incident.created":
-                self._link_incident(data)
-            elif name == "incident.updated":
-                self._on_incident_updated(data)
+            elif name == "reading.updated":
+                self._on_reading(data)
+            elif name == "risk.updated":
+                self._on_risk(data)
+            elif name in ("incident.created", "incident.updated", "incident.resolved"):
+                self._on_incident_event(name, data)
 
     def _code_of(self, building_id: str | None) -> str | None:
         return self.building_by_id.get(building_id or "") if building_id else None
 
-    def _link_incident(self, data: dict[str, Any]) -> None:
-        code = data.get("code", "")
-        hazard = data.get("hazard")
-        bcode = self.building_by_id.get(data.get("building_id") or "")
-        alert_id = self._alert_id_for(hazard, bcode or data.get("node_code"))
-        if alert_id:
-            self.incident_links[code] = alert_id
-
-    def _alert_id_for(self, hazard: str | None, target: str | None) -> str | None:
-        if not target:
+    def _sensor_meta(self, sensor_code: str | None) -> dict[str, Any] | None:
+        if not sensor_code:
             return None
-        prefix = {"fire": "AL-FIRE-", "flood": "AL-FLOOD-", "structural": "AL-STR-"}.get(hazard or "", "")
-        if hazard == "flood":
-            return None
-        return f"{prefix}{target}" if prefix else None
+        return next((s for s in self.sensors if s["node_id"] == sensor_code), None)
 
-    def _on_incident_updated(self, data: dict[str, Any]) -> None:
-        code = data.get("code", "")
-        new_status = data.get("status")
-        alert_id = self.incident_links.get(code)
-        if alert_id is None:
+    def _normalize_live_values(self, kind: str | None, values: dict[str, Any]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for key, raw in values.items():
+            if isinstance(raw, bool):
+                out[key] = 1.0 if raw else 0.0
+                continue
+            if isinstance(raw, (int, float)) and math.isfinite(float(raw)):
+                out[key] = float(raw)
+        if kind == "smoke_temp":
+            if "temp_c" not in out and "temperature_c" in out:
+                out["temp_c"] = out["temperature_c"]
+            if "temperature_c" not in out and "temp_c" in out:
+                out["temperature_c"] = out["temp_c"]
+            if "smoke_ppm" not in out and "smoke_level" in out:
+                out["smoke_ppm"] = out["smoke_level"] * 10.0
+            if "smoke_level" not in out and "smoke_ppm" in out:
+                out["smoke_level"] = out["smoke_ppm"] / 10.0
+        elif kind == "rain_level":
+            if "level_cm" not in out and "water_level_cm" in out:
+                out["level_cm"] = out["water_level_cm"]
+            if "water_level_cm" not in out and "level_cm" in out:
+                out["water_level_cm"] = out["level_cm"]
+        return out
+
+    def _telemetry_item(
+        self, sensor: dict[str, Any], live: dict[str, Any] | None, t: float | None = None
+    ) -> dict[str, Any]:
+        t = now_ms() if t is None else t
+        bat = clamp(self.battery.get(sensor["node_id"], 100.0), 5, 100)
+        sim_values = self._sim_values(sensor, t)
+        device_id = sensor.get("device_id")
+        item: dict[str, Any] = {
+            "node_id": sensor["node_id"],
+            "kind": sensor["kind"],
+            "ts": int(t),
+            "battery": r1(bat),
+            "device_id": device_id,
+            "simulation": bool(sensor.get("simulation", True)),
+            "source": sensor.get("source") or "simulation",
+            "realtime": device_id in IOT_DEVICES,
+            # `values` always carries the simulation engine's output so that
+            # live Wokwi readings can never overwrite Simulation Mode.
+            "values": sim_values,
+            "sim_values": dict(sim_values),
+            "live": False,
+            "stale": True,
+        }
+        if live is not None:
+            fresh = (t - float(live.get("ts", 0.0))) <= LIVE_TTL_MS
+            item["live"] = fresh
+            item["stale"] = not fresh
+            item["live_values"] = dict(live.get("values") or {})
+            item["observed_at"] = live.get("observed_at")
+        risk = self.risks.get(sensor["node_id"])
+        if risk:
+            item["risk"] = {
+                "score": risk.get("score"),
+                "category": risk.get("category"),
+                "hazard": risk.get("hazard"),
+                "assessed_at": risk.get("assessed_at"),
+            }
+        live_risk = self.live_risks.get(sensor["node_id"])
+        if live_risk:
+            item["live_risk"] = {
+                "score": live_risk.get("score"),
+                "category": live_risk.get("category"),
+                "hazard": live_risk.get("hazard"),
+                "assessed_at": live_risk.get("assessed_at"),
+            }
+        return item
+
+    def _live_item(self, sensor: dict[str, Any], live: dict[str, Any]) -> dict[str, Any]:
+        """Frame for a freshly received hardware reading (realtime state only)."""
+        t = now_ms()
+        values = dict(live.get("values") or {})
+        return {
+            "node_id": sensor["node_id"],
+            "kind": sensor["kind"],
+            "ts": int(t),
+            "device_id": sensor.get("device_id"),
+            "simulation": bool(sensor.get("simulation", True)),
+            "source": live.get("source") or sensor.get("source") or "simulation",
+            "realtime": sensor.get("device_id") in IOT_DEVICES,
+            "values": values,
+            "live_values": values,
+            "live": True,
+            "stale": False,
+            "observed_at": live.get("observed_at"),
+        }
+
+    def _on_reading(self, data: dict[str, Any]) -> None:
+        sensor_code = data.get("sensor_code") or data.get("sensor_id")
+        sensor = self._sensor_meta(sensor_code)
+        if sensor is None:
+            logger.warning("reading.updated for unknown sensor %s", sensor_code)
             return
-        alert = self.alerts.get(alert_id)
+        values = self._normalize_live_values(sensor.get("kind"), data.get("values") or {})
+        if not values:
+            return
+        if not data.get("realtime") or sensor.get("device_id") not in IOT_DEVICES:
+            # Simulation-engine readings keep driving Simulation Mode only.
+            return
+        entry = {
+            "device_id": data.get("device_id") or sensor.get("device_id"),
+            "values": values,
+            "source": data.get("source") or "simulation",
+            "simulation": bool(data.get("simulation", True)),
+            "observed_at": data.get("observed_at"),
+            "ts": now_ms(),
+        }
+        self.live_readings[sensor["node_id"]] = entry
+        # A dedicated `live` frame keeps the simulation telemetry loop (and the
+        # dashboard log/rain history derived from it) completely untouched.
+        asyncio.get_event_loop().create_task(
+            self.broadcast({"t": "live", "items": [self._live_item(sensor, entry)]})
+        )
+
+    def _on_risk(self, data: dict[str, Any]) -> None:
+        key = data.get("sensor_code") or data.get("entity_code")
+        if not key:
+            return
+        realtime = bool(data.get("realtime"))
+        if realtime:
+            self.live_risks[key] = data
+        else:
+            self.risks[key] = data
+        asyncio.get_event_loop().create_task(self.broadcast({"t": "risk", "risk": data}))
+
+        bcode = data.get("building_code") or self._code_of(data.get("building_id"))
+        b = self.buildings.get(bcode or "")
+        if b is None:
+            return
+        category = data.get("category")
+        hazard = data.get("hazard")
+        patch: dict[str, Any] = {}
+        if hazard == "fire" and category in ("high", "critical"):
+            patch["status"] = "fire"
+            patch["priority"] = max(int(b.get("priority", 0)), int(data.get("score", 0)))
+        elif hazard == "structural":
+            vals = {}
+            if realtime:
+                live = self.live_readings.get(data.get("sensor_code") or "") or {}
+                vals = live.get("values") or {}
+            tilt = float(vals.get("tilt_deg", b.get("tilt_deg", 0.0)) or 0.0)
+            crack = float(vals.get("crack_mm", b.get("crack_mm", 0.0)) or 0.0)
+            patch["tilt_deg"] = tilt
+            patch["crack_mm"] = crack
+            patch["status"] = (
+                "inspect" if category in ("high", "critical")
+                else "watch" if category in ("warning", "low")
+                else "ok"
+            )
+            patch["priority"] = int(clamp(round(b.get("priority", 0) + tilt * 14 + crack * 8), 0, 99))
+        if patch and any(b.get(k) != v for k, v in patch.items()):
+            self._patch_building(bcode, patch, realtime=realtime)
+
+    def _on_incident_event(self, name: str, data: dict[str, Any]) -> None:
+        code = data.get("code")
+        if not code:
+            return
+        bcode = data.get("building_code") or self._code_of(data.get("building_id"))
+        realtime = self._incident_realtime(data, bcode, data.get("node_code"))
+        alert = self._upsert_incident_alert(data, realtime)
         if alert is None:
             return
-        status_map = {"open": "new", "acknowledged": "ack", "resolved": "resolved", "false_alarm": "resolved"}
-        alert["status"] = status_map.get(new_status, alert["status"])
-        alert["updated_at"] = now_ms()
-        self.alerts[alert_id] = alert
+        self.incident_links[code] = alert["id"]
         asyncio.get_event_loop().create_task(self.broadcast({"t": "alert", "alert": alert}))
-        if new_status == "resolved":
+        if name == "incident.resolved" or alert["status"] == "resolved":
             asyncio.get_event_loop().create_task(self._on_resolved(alert))
 
+    def _upsert_incident_alert(
+        self, data: dict[str, Any], realtime: bool = False
+    ) -> dict[str, Any] | None:
+        code = data.get("code")
+        if not code:
+            return None
+        # Realtime incidents get their own dashboard namespace so the shared
+        # DB code can never overwrite (or be overwritten by) simulation state.
+        alert_id = f"RT-{code}" if realtime else code
+        prev = self.alerts.get(alert_id)
+        bcode = data.get("building_code") or self._code_of(data.get("building_id"))
+        node_code = data.get("node_code")
+        pos = data.get("pos") or (self.buildings.get(bcode or "", {}).get("center")) or None
+        if pos is None and node_code and self.graph is not None and node_code in self.graph.nodes:
+            pos = self.graph.nodes[node_code].pos
+        if pos is None:
+            pos = [74.8575, 32.7285]
+        opened_ms = prev.get("created_at") if prev else None
+        if opened_ms is None:
+            try:
+                opened_ms = datetime.fromisoformat(str(data.get("opened_at"))).timestamp() * 1000.0
+            except (TypeError, ValueError):
+                opened_ms = now_ms()
+        updated_ms = now_ms()
+        if data.get("last_update"):
+            try:
+                updated_ms = datetime.fromisoformat(str(data["last_update"])).timestamp() * 1000.0
+            except ValueError:
+                pass
+        status = STATUS_TO_ALERT.get(data.get("status") or "open", "new")
+        if prev:
+            # Never resurrect a resolved alert or downgrade an operator action
+            # just because a later risk tick still reports status=open.
+            rank = {"new": 0, "ack": 1, "dispatched": 2, "resolved": 3}
+            if prev.get("status") == "resolved" and status != "resolved":
+                status = "resolved"
+            elif rank.get(status, 0) < rank.get(prev.get("status"), 0):
+                status = prev["status"]
+            prev.update(
+                {
+                    "severity": data.get("severity", prev["severity"]),
+                    "status": status,
+                    "title": data.get("title", prev["title"]),
+                    "detail": (data.get("description") or prev.get("detail") or "")[:180],
+                    "building_id": bcode or prev.get("building_id"),
+                    "node_code": node_code or prev.get("node_code"),
+                    "target": bcode or node_code or prev.get("target") or "area",
+                    "pos": pos,
+                    "updated_at": updated_ms,
+                    "last_update": data.get("last_update") or prev.get("last_update"),
+                    "simulation": bool(data.get("simulation", prev.get("simulation", True))),
+                    "realtime": realtime or bool(prev.get("realtime")),
+                }
+            )
+            return self.alerts[alert_id]
+
+        alert = {
+            "id": alert_id,
+            "module": RISK_MODULE.get(data.get("hazard"), "map"),
+            "severity": data.get("severity", "medium"),
+            "status": status,
+            "title": data.get("title") or f"{data.get('hazard', 'risk')} incident, {code}",
+            "detail": (data.get("description") or "")[:180],
+            "building_id": bcode,
+            "node_code": node_code,
+            "target": bcode or node_code or "area",
+            "pos": pos,
+            "confidence": SEVERITY_CONFIDENCE.get(data.get("severity"), 0.6),
+            "sources": [],
+            "created_at": opened_ms,
+            "updated_at": updated_ms,
+            "last_update": data.get("last_update"),
+            "simulation": bool(data.get("simulation", True)),
+            "realtime": realtime,
+            "recommendation": None,
+        }
+        self.alerts[alert_id] = alert
+        return alert
+
     async def _on_resolved(self, alert: dict[str, Any]) -> None:
+        realtime = bool(alert.get("realtime"))
         if alert["module"] == "fire" and alert.get("building_id"):
             bid = alert["building_id"]
-            self.fires.pop(bid, None)
-            hz_id = f"HZ-{bid}"
-            app_state.deactivate_hazard(hz_id)
-            hz = self.hazards.get(hz_id)
-            if hz:
-                hz = {**hz, "active": False}
-                self.hazards[hz_id] = hz
-                await self.broadcast({"t": "hazard", "hazard": hz})
-            self.routes.pop(alert["id"], None)
-            await self.broadcast({"t": "routes", "alert_id": alert["id"], "routes": []})
-            self._patch_building(bid, {"status": "ok"})
+            if not realtime:
+                self.fires.pop(bid, None)
+                hz_id = f"HZ-{bid}"
+                app_state.deactivate_hazard(hz_id)
+                hz = self.hazards.get(hz_id)
+                if hz:
+                    hz = {**hz, "active": False}
+                    self.hazards[hz_id] = hz
+                    await self.broadcast({"t": "hazard", "hazard": hz})
+                self.routes.pop(alert["id"], None)
+                await self.broadcast({"t": "routes", "alert_id": alert["id"], "routes": []})
+            self._patch_building(bid, {"status": "ok"}, realtime=realtime)
         if alert["module"] == "structure" and alert.get("building_id"):
-            self.cracks.pop(alert["building_id"], None)
-            self._patch_building(alert["building_id"], {"status": "watch"})
-        if alert["module"] == "flood":
+            if not realtime:
+                self.cracks.pop(alert["building_id"], None)
+            self._patch_building(alert["building_id"], {"status": "watch"}, realtime=realtime)
+        if alert["module"] == "flood" and not realtime:
             self.flood_t0 = None
 
-    def _patch_building(self, bcode: str, patch: dict[str, Any]) -> None:
+    def _patch_building(self, bcode: str, patch: dict[str, Any], realtime: bool = False) -> None:
         b = self.buildings.get(bcode)
         if b is None:
             return
-        b.update(patch)
-        asyncio.get_event_loop().create_task(self.broadcast({"t": "building", "id": bcode, "patch": patch}))
+        if realtime:
+            # Keep the shared/simulation building record untouched; the
+            # frontend applies this to its Realtime Mode building view.
+            self.live_building_patches.setdefault(bcode, {}).update(patch)
+        else:
+            b.update(patch)
+        asyncio.get_event_loop().create_task(
+            self.broadcast({"t": "building", "id": bcode, "patch": patch, "realtime": realtime})
+        )
 
     async def handle_cmd(self, ws: WebSocket, cmd: dict[str, Any]) -> None:
         kind = cmd.get("cmd")
@@ -384,24 +722,25 @@ class FrontendWorld:
     async def handle_alert_action(self, alert_id: str, action: str) -> None:
         async with self.session_factory() as session:
             hazard_of = {"AL-FIRE-": "fire", "AL-FLOOD-": "flood", "AL-STR-": "structural"}
+            lookup_id = alert_id[3:] if alert_id.startswith("RT-") else alert_id
             incident = None
             for prefix, hazard in hazard_of.items():
-                if alert_id.startswith(prefix):
+                if lookup_id.startswith(prefix):
                     active = await incident_repo.list_incidents(session, status="open", hazard=hazard)
                     candidates = [
                         i for i in active
-                        if alert_id.endswith(self._target_suffix(i))
+                        if lookup_id.endswith(self._target_suffix(i))
                     ]
                     if not candidates:
                         candidates = [
                             i for i in await incident_repo.list_incidents(session, status="acknowledged", hazard=hazard)
-                            if alert_id.endswith(self._target_suffix(i))
+                            if lookup_id.endswith(self._target_suffix(i))
                         ]
                     if candidates:
                         incident = candidates[0]
                     break
             if incident is None:
-                incident = await incident_repo.get_by_code(session, alert_id)
+                incident = await incident_repo.get_by_code(session, lookup_id)
             if incident is None:
                 await self._apply_live_alert_action(alert_id, action)
                 return
@@ -429,7 +768,9 @@ class FrontendWorld:
         from app.realtime.bus import bus
 
         for name, data in events:
-            await bus.broadcast_event(name, data)
+            await bus.broadcast_event(
+                name, data, simulation=bool(data.get("simulation", True))
+            )
 
     async def _apply_live_alert_action(self, alert_id: str, action: str) -> None:
         """Resolve/ack/dispatch a dashboard alert that has no DB incident row.
@@ -442,17 +783,19 @@ class FrontendWorld:
         if alert is None or alert.get("status") == "resolved":
             return
         ts = now_ms()
+        iso = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).isoformat()
         if action == "ack":
-            alert = {**alert, "status": "ack", "updated_at": ts}
+            alert = {**alert, "status": "ack", "updated_at": ts, "last_update": iso}
         elif action == "dispatch":
             alert = {
                 **alert,
                 "status": "dispatched",
                 "dispatched_at": alert.get("dispatched_at") or ts,
                 "updated_at": ts,
+                "last_update": iso,
             }
         elif action == "resolve":
-            alert = {**alert, "status": "resolved", "updated_at": ts}
+            alert = {**alert, "status": "resolved", "updated_at": ts, "last_update": iso}
         else:
             return
         self.alerts[alert_id] = alert
@@ -466,7 +809,13 @@ class FrontendWorld:
 
     async def reset_world(self) -> None:
         await self.manager.shutdown()
-        self.alerts.clear()
+        # Reset only Simulation Mode. Realtime alerts, readings and risks are
+        # live sensor state and must survive a simulation reset.  The seeded
+        # database incidents are restored immediately afterwards so none of
+        # them can vanish from Simulation Mode.
+        self.alerts = {k: v for k, v in self.alerts.items() if v.get("realtime")}
+        for code, alert in self.seed_alerts.items():
+            self.alerts.setdefault(code, dict(alert))
         self.routes.clear()
         self.hazards.clear()
         app_state.clear_hazards()
@@ -479,6 +828,7 @@ class FrontendWorld:
         self.cracks.clear()
         self.flood_t0 = None
         self.rain = 0.0
+        self.risks.clear()
         self.levels = {s["node_id"]: 0.0 for s in self.sensors if s["kind"] == "rain_level"}
         for code, base in self.base_buildings.items():
             self.buildings[code] = dict(base)
@@ -489,7 +839,8 @@ class FrontendWorld:
 
             await session.execute(
                 update(Incident).values(status=IncidentStatus.resolved.value, resolved_at=datetime.now(timezone.utc)).where(
-                    Incident.status.in_([IncidentStatus.open.value, IncidentStatus.acknowledged.value])
+                    Incident.simulation_id.is_not(None),
+                    Incident.status.in_([IncidentStatus.open.value, IncidentStatus.acknowledged.value]),
                 )
             )
             await session.commit()
@@ -508,6 +859,45 @@ class FrontendWorld:
             except Exception:
                 logger.exception("telemetry loop error")
 
+    def _sim_values(self, s: dict[str, Any], t: float) -> dict[str, float]:
+        """Synthetic values for Simulation Mode, independent of Wokwi input."""
+        if s["kind"] == "smoke_temp":
+            smoke = 35 + random.uniform(-5, 5)
+            temp = 31.5 + random.uniform(-0.4, 0.4)
+            for bid, f in self.fires.items():
+                age = (t - f["t0"]) / 1000.0 - (5 if s["node_id"].endswith("b") else 0)
+                if age <= 0:
+                    continue
+                fb = self.buildings.get(bid)
+                if fb is None:
+                    continue
+                inf = 0.0
+                if s["building_id"] == bid:
+                    inf = 1.0
+                else:
+                    d = dist_m_sqrt(s["pos"], fb["center"])
+                    if d < 130:
+                        inf = 0.06 * (1 - d / 130)
+                smoke += min(900.0, age * 14) * inf
+                temp += min(110.0, age * 1.1) * inf
+            return {"smoke_ppm": round(smoke), "temp_c": r1(temp)}
+        if s["kind"] == "structure":
+            b0 = self.base_buildings.get(s.get("building_id") or "")
+            base_tilt = (b0 or {}).get("tilt_deg", 0.06)
+            base_crack = (b0 or {}).get("crack_mm", 0.1)
+            tilt = base_tilt + random.uniform(-0.01, 0.01)
+            crack = base_crack + random.uniform(-0.01, 0.01)
+            vib = 0.02 + random.uniform(-0.004, 0.004)
+            t0 = self.cracks.get(s.get("building_id") or "")
+            if t0 is not None:
+                age = (t - t0) / 1000.0
+                tilt += min(1.1, age * 0.012)
+                crack += min(1.2, age * 0.02)
+                vib += age * 0.0004
+            return {"tilt_deg": r2(tilt), "crack_mm": r2(crack), "vib_rms": r2(vib * 10) / 10}
+        rain_val = max(0.0, self.rain + (random.uniform(-1.5, 1.5) if self.rain > 0 else 0.0))
+        return {"rain_mmh": r1(rain_val), "level_cm": r1(self.levels.get(s["node_id"], 0.0))}
+
     def _telemetry(self) -> list[dict[str, Any]]:
         t = now_ms()
         self._step_weather(t)
@@ -515,48 +905,7 @@ class FrontendWorld:
         for s in self.sensors:
             bat = clamp((self.battery.get(s["node_id"], 80.0)) - random.random() * 0.002, 5, 100)
             self.battery[s["node_id"]] = bat
-            base = {"node_id": s["node_id"], "kind": s["kind"], "ts": int(t), "battery": r1(bat)}
-            if s["kind"] == "smoke_temp":
-                smoke = 35 + random.uniform(-5, 5)
-                temp = 31.5 + random.uniform(-0.4, 0.4)
-                for bid, f in self.fires.items():
-                    age = (t - f["t0"]) / 1000.0 - (5 if s["node_id"].endswith("b") else 0)
-                    if age <= 0:
-                        continue
-                    fb = self.buildings.get(bid)
-                    if fb is None:
-                        continue
-                    inf = 0.0
-                    if s["building_id"] == bid:
-                        inf = 1.0
-                    else:
-                        d = dist_m_sqrt(s["pos"], fb["center"])
-                        if d < 130:
-                            inf = 0.06 * (1 - d / 130)
-                    smoke += min(900.0, age * 14) * inf
-                    temp += min(110.0, age * 1.1) * inf
-                items.append({**base, "values": {"smoke_ppm": round(smoke), "temp_c": r1(temp)}})
-            elif s["kind"] == "structure":
-                b0 = self.base_buildings.get(s.get("building_id") or "")
-                base_tilt = (b0 or {}).get("tilt_deg", 0.06)
-                base_crack = (b0 or {}).get("crack_mm", 0.1)
-                tilt = base_tilt + random.uniform(-0.01, 0.01)
-                crack = base_crack + random.uniform(-0.01, 0.01)
-                vib = 0.02 + random.uniform(-0.004, 0.004)
-                t0 = self.cracks.get(s.get("building_id") or "")
-                if t0 is not None:
-                    age = (t - t0) / 1000.0
-                    tilt += min(1.1, age * 0.012)
-                    crack += min(1.2, age * 0.02)
-                    vib += age * 0.0004
-                items.append(
-                    {**base, "values": {"tilt_deg": r2(tilt), "crack_mm": r2(crack), "vib_rms": r2(vib * 10) / 10}}
-                )
-            else:
-                rain_val = max(0.0, self.rain + (random.uniform(-1.5, 1.5) if self.rain > 0 else 0.0))
-                items.append(
-                    {**base, "values": {"rain_mmh": r1(rain_val), "level_cm": r1(self.levels.get(s["node_id"], 0.0))}}
-                )
+            items.append(self._telemetry_item(s, self.live_readings.get(s["node_id"]), t))
         return items
 
     def _step_weather(self, t: float) -> None:
@@ -664,12 +1013,14 @@ class FrontendWorld:
                 "title": f"Fire confirmed, {b['id']}" if confirmed else f"Possible fire, {b['id']}",
                 "detail": f"{b['name']}, {b['floors']} floors, about {b['occupancy']} occupants. Simulated data.",
                 "building_id": b["id"],
+                "target": b["id"],
                 "pos": b["center"],
                 "confidence": round(conf * 100) / 100,
                 "sources": [x[1] for x in ps],
                 "created_at": (prev or {}).get("created_at") or (scn["t0"] if scn else t),
                 "updated_at": int(t),
                 "dispatched_at": dispatched_at,
+                "simulation": True,
                 "recommendation": "Evacuate via the route shown. Simulated demo, not a real emergency."
                 if confirmed
                 else "Waiting for a second independent signal before dispatch.",
@@ -780,11 +1131,13 @@ class FrontendWorld:
                 "title": f"Tilt and crack growth, {b['id']}" if high else f"Tilt watch, {b['id']}",
                 "detail": f"{b['name']}, built {b['year_built']}, {b['construction']}. Simulated deviation, no safety verdict.",
                 "building_id": b["id"],
+                "target": b["id"],
                 "pos": b["center"],
                 "confidence": round(conf * 100) / 100,
                 "sources": sources,
                 "created_at": (prev or {}).get("created_at", int(t)),
                 "updated_at": int(t),
+                "simulation": True,
                 "recommendation": "Queue for engineer inspection within 24 h. Demo ranking only."
                 if high
                 else "Keep on weekly review. Engineer to validate if tilt passes 0.8°.",
@@ -813,7 +1166,8 @@ class FrontendWorld:
                         "label": f"{lvl:.0f} cm",
                     }
                 )
-            alert_id = f"AL-FLOOD-{s['node_id']}"
+            target = s.get("node_code") or s["node_id"]
+            alert_id = f"AL-FLOOD-{target}"
             prev = self.alerts.get(alert_id)
             if (prev and prev.get("status") == "resolved") or lvl < 10:
                 continue
@@ -827,6 +1181,8 @@ class FrontendWorld:
                 "status": prev["status"] if prev and prev.get("severity") == severity else "new",
                 "title": f"Waterlogging risk, {s['label']}",
                 "detail": f"Water level {lvl:.0f} cm, rainfall {v['rain_mmh']:.0f} mm/h. Simulated rain event.",
+                "node_code": s.get("node_code"),
+                "target": target,
                 "pos": s["pos"],
                 "confidence": round(conf * 100) / 100,
                 "sources": [
@@ -838,6 +1194,7 @@ class FrontendWorld:
                 ],
                 "created_at": (prev or {}).get("created_at", int(t)),
                 "updated_at": int(t),
+                "simulation": True,
                 "recommendation": "Avoid this lane for tenders. Pre-position a pump. Simulated scenario."
                 if high
                 else "Watch level. Check the drain at the nearest junction.",

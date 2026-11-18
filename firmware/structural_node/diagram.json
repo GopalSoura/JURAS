@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "author": "JURAS",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-mpu6050", "id": "mpu1", "top": -120, "left": 250, "attrs": {} },
+    { "type": "wokwi-potentiometer", "id": "pot_crack", "top": 60, "left": 230, "attrs": { "value": "0" } },
+    { "type": "wokwi-potentiometer", "id": "pot_vib", "top": 260, "left": 230, "attrs": { "value": "0" } },
+    { "type": "wokwi-led", "id": "led_red", "top": -20, "left": 480, "attrs": { "color": "red", "label": "RED" } },
+    { "type": "wokwi-resistor", "id": "r_red", "top": 10, "left": 420, "attrs": { "value": "220" } },
+    { "type": "wokwi-buzzer", "id": "buzzer1", "top": 140, "left": 480, "attrs": { "volume": "0.1" } }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "mpu1:VCC", "esp:3V3", "red", [] ],
+    [ "mpu1:GND", "esp:GND.1", "black", [] ],
+    [ "mpu1:SDA", "esp:21", "green", [] ],
+    [ "mpu1:SCL", "esp:22", "blue", [] ],
+    [ "pot_crack:VCC", "esp:3V3", "red", [] ],
+    [ "pot_crack:GND", "esp:GND.2", "black", [] ],
+    [ "pot_crack:SIG", "esp:34", "green", [] ],
+    [ "pot_vib:VCC", "esp:3V3", "red", [] ],
+    [ "pot_vib:GND", "esp:GND.3", "black", [] ],
+    [ "pot_vib:SIG", "esp:35", "green", [] ],
+    [ "led_red:A", "r_red:1", "red", [] ],
+    [ "r_red:2", "esp:26", "red", [] ],
+    [ "led_red:C", "esp:GND.1", "black", [] ],
+    [ "buzzer1:1", "esp:GND.2", "black", [] ],
+    [ "buzzer1:2", "esp:27", "red", [] ]
+  ],
+  "dependencies": {}
+}

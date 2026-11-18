@@ -11,6 +11,17 @@ const MODULE_ICON: Record<AlertModule, IconName> = { fire: 'flame', structure: '
 const ACT_LABEL: Record<AlertModule, string> = { fire: 'Dispatch units', structure: 'Assign engineer', flood: 'Send crew', map: 'Send to field' };
 const SRC_COLOR: Record<string, string> = { sensor: 'var(--accent)', citizen: 'var(--amber)', camera: '#b08be8', cv: 'var(--green)', field: 'var(--dim)' };
 const SRC_LABEL: Record<string, string> = { sensor: 'Sensor', citizen: 'Citizen', camera: 'Camera', cv: 'Photo AI', field: 'Field' };
+const STATUS_LABEL: Record<string, string> = { new: 'Open', ack: 'Acknowledged', dispatched: 'Dispatched', resolved: 'Resolved' };
+
+const timeLabel = (ts: number) => new Date(ts).toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false });
+
+function alertTime(a: Alert): number {
+  if (a.last_update) {
+    const t = Date.parse(a.last_update);
+    if (!Number.isNaN(t)) return t;
+  }
+  return a.updated_at;
+}
 
 function AlertRow({ a, now }: { a: Alert; now: number }) {
   const selected = useStore((s) => s.selectedAlert === a.id);
@@ -46,6 +57,15 @@ function AlertRow({ a, now }: { a: Alert; now: number }) {
               <span className="px-1 py-px text-[9.5px] text-dim" style={{ background: 'var(--raise)' }}>
                 {MODULE_LABEL[a.module]}
               </span>
+              {a.realtime ? (
+                <span className="px-1 py-px text-[9.5px] font-semibold tracking-[0.06em]" style={{ color: 'var(--green)', background: 'var(--green)1c' }}>
+                  REALTIME
+                </span>
+              ) : a.simulation ? (
+                <span className="px-1 py-px text-[9.5px] font-semibold tracking-[0.06em]" style={{ color: 'var(--amber)', background: 'var(--amber)1c' }}>
+                  SIMULATION
+                </span>
+              ) : null}
               {[...new Set(a.sources.map((x) => x.kind))].slice(0, 3).map((k) => (
                 <span key={k} className="flex items-center gap-1 px-1 py-px text-[9.5px] text-dim" style={{ background: 'var(--raise)' }}>
                   <i className="inline-block h-1 w-1" style={{ background: SRC_COLOR[k] }} />
@@ -65,6 +85,24 @@ function AlertRow({ a, now }: { a: Alert; now: number }) {
 
       {selected && (
         <div className="border-t border-line bg-panel px-2.5 py-2 pl-3.5 text-[11.5px]">
+          <dl className="mb-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[10.5px]">
+            <div>
+              <dt className="text-dim">Target</dt>
+              <dd className="truncate font-mono text-ink">{a.target ?? a.building_id ?? a.node_code ?? '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-dim">Status</dt>
+              <dd className="text-ink">{STATUS_LABEL[a.status] ?? a.status}</dd>
+            </div>
+            <div>
+              <dt className="text-dim">Opened</dt>
+              <dd className="num font-mono text-ink">{timeLabel(a.created_at)}</dd>
+            </div>
+            <div>
+              <dt className="text-dim">Latest update</dt>
+              <dd className="num font-mono text-ink">{timeLabel(alertTime(a))}</dd>
+            </div>
+          </dl>
           <ul className="mb-2 space-y-0.5 text-dim">
             {a.sources.map((src, i) => (
               <li key={i} className="flex gap-1.5">

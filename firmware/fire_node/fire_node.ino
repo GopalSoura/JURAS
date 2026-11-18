@@ -9,16 +9,17 @@
 //   Green LED    -> GPIO 14
 //   Buzzer       -> GPIO 13
 //
-// Libraries: DHT sensor library (Adafruit) + Adafruit Unified Sensor.
-//
 // Backend contract: POST /api/v1/readings (the existing JURAS ingestion
 // endpoint). The sketch sends the exact ReadingCreate fields plus extra
 // hardware values that the backend stores but does not need for risk.
 //
 // For local development with the Wokwi Private IoT Gateway:
-//   SERVER_URL = "http://host.wokwi.internal:8000/api/v1/readings"
-// For a public HTTPS backend, use its canonical URL. Never use a URL that
-// redirects (301/302/307/308), because POST redirects are rejected here.
+//   BACKEND_URL = "http://host.wokwi.internal:8000"
+// For a public HTTPS backend, use its canonical base URL (no trailing slash).
+// Never use a URL that redirects (301/302/307/308), because POST redirects are
+// rejected here.
+//
+// Libraries: DHT sensor library (Adafruit) + Adafruit Unified Sensor.
 
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -35,7 +36,10 @@
 #define WIFI_PASSWORD ""
 #define WIFI_CHANNEL 6
 
-const char* SERVER_URL = "http://host.wokwi.internal:8000/api/v1/readings";
+// Change this one line when the backend moves (local gateway, LAN IP or a
+// public HTTPS deployment).  Keep it a base URL; the path is added below.
+const char* BACKEND_URL = "https://liability-boat-interaction-manuals.trycloudflare.com";
+const char* TELEMETRY_PATH = "/api/v1/readings";
 
 // Optional shared secret. Leave empty when the backend does not set
 // DEVICE_API_KEY. When set on both sides it is sent as X-Device-Key.
@@ -83,8 +87,9 @@ const float SMOKE_TEMP_COMBO_LEVEL = 60.0;
 // ==========================================
 
 const unsigned long SENSOR_INTERVAL_MS = 2000;
-const unsigned long UPLOAD_INTERVAL_MS = 5000;
+const unsigned long UPLOAD_INTERVAL_MS = 2500;
 const unsigned long FLUSH_INTERVAL_MS = 1000;
+const unsigned long MAX_BACKOFF_MS = 30000;
 const unsigned long WIFI_RETRY_MS = 10000;
 const unsigned long ALERT_BLINK_MS = 500;
 const unsigned long BUZZER_BEEP_MS = 120;
@@ -103,6 +108,15 @@ enum FireState {
   STATE_CRITICAL
 };
 
+// Declared before the first function: the Arduino auto-prototype pass hoists
+// function signatures to the top of the sketch, so a custom return type must
+// already be visible there.
+enum PostResult {
+  POST_OK,
+  POST_RETRY,
+  POST_DROP
+};
+
 struct Sample {
   uint32_t seq;
   time_t epoch;
@@ -110,6 +124,7 @@ struct Sample {
   float humidity_pct;
   int smoke_raw;
   float smoke_level;
+  float smoke_ppm;
   bool flame;
   bool dht_ok;
   int rssi;
@@ -121,11 +136,10 @@ FireState fireState = STATE_NORMAL;
 
 float temperatureC = NAN;
 float humidityPct = NAN;
-float lastGoodTemperature = NAN;
-float lastGoodHumidity = NAN;
 
 int smokeRaw = 0;
 float smokeLevel = 0.0;
+float smokePpm = 0.0;
 float gasBaseline = 800.0;
 
 bool dhtOk = false;
@@ -146,6 +160,7 @@ unsigned long lastSensorRead = 0;
 unsigned long lastUpload = 0;
 unsigned long lastWifiAttempt = 0;
 unsigned long lastNtpRequest = 0;
+unsigned long retryBackoffMs = 0;
 
 // ==========================================
 // 7. WIFI + TIME
@@ -183,8 +198,12 @@ void maintainWifi(unsigned long now) {
 
   if (now - lastWifiAttempt >= WIFI_RETRY_MS) {
     lastWifiAttempt = now;
-    Serial.println("Reconnecting WiFi...");
+    Serial.print("Reconnecting WiFi... (status ");
+    Serial.print((int)WiFi.status());
+    Serial.println(")");
     WiFi.disconnect();
+    delay(100);
+    WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD, WIFI_CHANNEL);
   }
 }
@@ -222,14 +241,15 @@ void readSensors() {
           h >= 0.0 && h <= 100.0;
 
   if (dhtOk) {
-    lastGoodTemperature = t;
-    lastGoodHumidity = h;
+    temperatureC = t;
+    humidityPct = h;
   } else {
-    Serial.println("DHT22 read failed. Keeping last good values.");
+    // Never resend an old DHT sample as if it were current.  The payload
+    // builder omits non-finite values so the dashboard shows N/A.
+    temperatureC = NAN;
+    humidityPct = NAN;
+    Serial.println("DHT22 read failed. Temperature/humidity will be N/A.");
   }
-
-  temperatureC = dhtOk ? t : lastGoodTemperature;
-  humidityPct = dhtOk ? h : lastGoodHumidity;
 
   smokeRaw = analogRead(MQ2_PIN);
   if (smokeRaw < 0) {
@@ -249,6 +269,13 @@ void readSensors() {
     smokeLevel = 0.0;
   }
   smokeLevel = constrain(smokeLevel, 0.0, 100.0);
+
+  // Demo calibration: the existing sketch reports a 0-100 smoke level and the
+  // backend risk rule treats 10 level units as roughly 10 ppm-equivalent
+  // units.  Keep the conversion in one place so the payload and the display
+  // cannot disagree.  A real MQ-2 deployment must replace this with an
+  // Rs/R0 curve calibrated against a known gas concentration.
+  smokePpm = smokeLevel * 10.0;
 
   // Track clean-air drift slowly, but never while smoke or flame is present.
   if (!flameDetected && smokeLevel < 10.0) {
@@ -340,6 +367,9 @@ void printReadings() {
   Serial.println(gasBaseline, 1);
   Serial.print("Smoke level: ");
   Serial.println(smokeLevel, 1);
+  Serial.print("Smoke approx: ");
+  Serial.print(smokePpm, 0);
+  Serial.println(" ppm (demo calibration)");
   Serial.print("Flame button: ");
   Serial.println(flameDetected ? "TRIGGERED" : "clear");
   Serial.print("State: ");
@@ -367,6 +397,7 @@ Sample captureSample() {
   s.humidity_pct = humidityPct;
   s.smoke_raw = smokeRaw;
   s.smoke_level = smokeLevel;
+  s.smoke_ppm = smokePpm;
   s.flame = flameDetected;
   s.dht_ok = dhtOk;
   s.rssi = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
@@ -375,11 +406,12 @@ Sample captureSample() {
 
 String buildPayload(const Sample &s) {
   String p = "{";
+  p += "\"device_id\":\"" DEVICE_ID "\",";
   p += "\"sensor_id\":\"" SENSOR_CODE "\",";
   p += "\"building_id\":\"" BUILDING_CODE "\",";
   p += "\"hazard\":\"fire\",";
-  p += "\"source\":\"field\",";
-  p += "\"simulation\":false,";
+  p += "\"source\":\"simulation\",";
+  p += "\"simulation\":true,";
 
   if (s.epoch >= 1700000000) {
     p += "\"observed_at\":\"" + isoUtc(s.epoch) + "\",";
@@ -387,38 +419,33 @@ String buildPayload(const Sample &s) {
 
   p += "\"values\":{";
   bool first = true;
-
-  if (isfinite(s.temperature_c)) {
-    p += "\"temperature_c\":" + String(s.temperature_c, 2);
-    first = false;
-  }
-  if (isfinite(s.humidity_pct)) {
+  auto addField = [&p, &first](const String &field) {
     if (!first) {
       p += ",";
     }
-    p += "\"humidity_pct\":" + String(s.humidity_pct, 2);
+    p += field;
     first = false;
+  };
+
+  // DHT22 failure is sent as a health flag only; no stale sample is
+  // repeated.  Omitting the fields makes the dashboard render N/A.
+  if (s.dht_ok && isfinite(s.temperature_c)) {
+    addField("\"temperature_c\":" + String(s.temperature_c, 2));
+  }
+  if (s.dht_ok && isfinite(s.humidity_pct)) {
+    addField("\"humidity_pct\":" + String(s.humidity_pct, 2));
   }
 
-  if (!first) {
-    p += ",";
-  }
-
-  p += "\"smoke_raw\":" + String(s.smoke_raw) + ",";
-  p += "\"smoke_level\":" + String(s.smoke_level, 2) + ",";
-  p += "\"flame\":" + String(s.flame ? 1 : 0) + ",";
-  p += "\"dht_ok\":" + String(s.dht_ok ? 1 : 0) + ",";
-  p += "\"rssi\":" + String(s.rssi) + ",";
-  p += "\"seq\":" + String((unsigned long)s.seq);
+  addField("\"smoke_raw\":" + String(s.smoke_raw));
+  addField("\"smoke_level\":" + String(s.smoke_level, 2));
+  addField("\"smoke_ppm\":" + String(s.smoke_ppm, 1));
+  addField("\"flame\":" + String(s.flame ? 1 : 0));
+  addField("\"dht_ok\":" + String(s.dht_ok ? 1 : 0));
+  addField("\"rssi\":" + String(s.rssi));
+  addField("\"seq\":" + String((unsigned long)s.seq));
   p += "}}";
   return p;
 }
-
-enum PostResult {
-  POST_OK,
-  POST_RETRY,
-  POST_DROP
-};
 
 PostResult executePost(HTTPClient &http, const String &payload, const Sample &s) {
   http.addHeader("Content-Type", "application/json");
@@ -435,6 +462,11 @@ PostResult executePost(HTTPClient &http, const String &payload, const Sample &s)
   if (code >= 200 && code < 300) {
     Serial.print("Telemetry accepted: HTTP ");
     Serial.println(code);
+    String body = http.getString();
+    if (body.length()) {
+      Serial.print("Response: ");
+      Serial.println(body);
+    }
     return POST_OK;
   }
 
@@ -462,15 +494,19 @@ PostResult postSample(const Sample &s) {
     return POST_RETRY;
   }
 
-  String url = String(SERVER_URL);
+  String base = String(BACKEND_URL);
+  while (base.endsWith("/")) {
+    base.remove(base.length() - 1);
+  }
+  String url = base + TELEMETRY_PATH;
   String payload = buildPayload(s);
 
   Serial.println("POST " + url);
   Serial.println(payload);
 
   HTTPClient http;
-  http.setConnectTimeout(5000);
-  http.setTimeout(5000);
+  http.setConnectTimeout(2500);
+  http.setTimeout(2500);
   http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
 
   if (url.startsWith("https://")) {
@@ -536,7 +572,7 @@ void uploadLoop(unsigned long now) {
   }
 
   bool flushing = queueCount > 0;
-  unsigned long interval = flushing ? FLUSH_INTERVAL_MS : UPLOAD_INTERVAL_MS;
+  unsigned long interval = flushing ? FLUSH_INTERVAL_MS : (retryBackoffMs > 0 ? retryBackoffMs : UPLOAD_INTERVAL_MS);
   if (now - lastUpload < interval) {
     return;
   }
@@ -545,16 +581,29 @@ void uploadLoop(unsigned long now) {
   Sample sample = flushing ? queue[0] : pending;
   PostResult result = postSample(sample);
 
-  if (result == POST_OK || result == POST_DROP) {
+  if (result == POST_OK) {
+    retryBackoffMs = 0;
     if (flushing) {
       popSample();
     }
-    if (result == POST_DROP) {
-      Serial.println("Sample dropped after non-retryable response.");
+  } else if (result == POST_DROP) {
+    retryBackoffMs = 0;
+    if (flushing) {
+      popSample();
     }
+    Serial.println("Sample dropped after non-retryable response.");
   } else if (!flushing) {
     enqueueSample(pending);
-    Serial.println("Upload failed: sample buffered for retry.");
+    retryBackoffMs = retryBackoffMs == 0 ? UPLOAD_INTERVAL_MS : min(MAX_BACKOFF_MS, retryBackoffMs * 2);
+    Serial.print("Upload failed: sample buffered. Retry in ");
+    Serial.print(retryBackoffMs);
+    Serial.println(" ms");
+  } else {
+    // A queued sample failed; keep it at the head and back off a little.
+    retryBackoffMs = retryBackoffMs == 0 ? FLUSH_INTERVAL_MS : min(MAX_BACKOFF_MS, retryBackoffMs * 2);
+    Serial.print("Flush failed: retry in ");
+    Serial.print(retryBackoffMs);
+    Serial.println(" ms");
   }
 }
 
@@ -608,7 +657,9 @@ void setup() {
     Serial.println(WiFi.localIP());
     requestNtpSync();
   } else {
-    Serial.println("WiFi not connected yet. Will retry in the main loop.");
+    Serial.print("WiFi not connected yet (status ");
+    Serial.print((int)WiFi.status());
+    Serial.println("). Will retry in the main loop.");
     lastWifiAttempt = millis();
   }
 

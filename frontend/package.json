@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "sim:check": "tsx scripts/sim-check.ts",
-    "nav:check": "tsx scripts/nav-check.ts"
+    "nav:check": "tsx scripts/nav-check.ts",
+    "live:check": "tsx scripts/live-check.ts"
   },
   "dependencies": {
     "@deck.gl/core": "^9.1.0",

@@ -6,15 +6,21 @@ import { SEV_META } from '../lib/meta';
 
 const STATUS = {
   sim: { text: 'SIMULATED FEED', color: 'var(--amber)' },
-  live: { text: 'LIVE BACKEND', color: 'var(--green)' },
+  live: { text: 'CONNECTED', color: 'var(--green)' },
   connecting: { text: 'CONNECTING', color: 'var(--accent)' },
-  offline: { text: 'BACKEND OFFLINE', color: 'var(--red)' },
+  reconnecting: { text: 'RECONNECTING', color: 'var(--amber)' },
+  offline: { text: 'DISCONNECTED', color: 'var(--red)' },
 } as const;
 
 export function TopBar() {
   const alerts = useStore((s) => s.alerts);
   const status = useStore((s) => s.feedStatus);
-  const rain = useStore((s) => s.rainHistory[s.rainHistory.length - 1]?.rain ?? 0);
+  const mode = useStore((s) => s.mode);
+  const setMode = useStore((s) => s.setMode);
+  const simRain = useStore((s) => s.rainHistory[s.rainHistory.length - 1]?.rain);
+  const liveRain = useStore((s) => s.liveState['JM-R01']?.values?.rain_mmh);
+  const rain = mode === 'realtime' ? liveRain : simRain;
+  const rainLabel = typeof rain === 'number' && Number.isFinite(rain) ? rain.toFixed(0) : 'N/A';
   const selectAlert = useStore((s) => s.selectAlert);
   const now = useNow(1000);
 
@@ -54,8 +60,23 @@ export function TopBar() {
       </div>
 
       <div className="ml-auto flex shrink-0 items-center gap-2 text-[11.5px]">
+        <div className="flex border border-line" role="group" aria-label="JURAS view mode">
+          {(['simulation', 'realtime'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMode(m)}
+              aria-pressed={mode === m}
+              className={`px-2 py-1 text-[10px] font-semibold tracking-[0.08em] transition-colors ${
+                mode === m ? 'bg-accent text-black' : 'text-dim hover:text-ink'
+              }`}
+            >
+              {m === 'simulation' ? 'SIMULATION' : 'REALTIME'}
+            </button>
+          ))}
+        </div>
         <span className="hidden items-center gap-1.5 border border-line px-2 py-1 text-dim sm:flex">
-          Rain <b className="num font-mono text-ink">{rain.toFixed(0)}</b> mm/h
+          Rain <b className="num font-mono text-ink">{rainLabel}</b> mm/h
         </span>
         <span className="flex items-center gap-1.5 border px-2 py-1 text-[10.5px] font-semibold tracking-[0.08em]" style={{ borderColor: st.color + '55', color: st.color }}>
           <span className="inline-block h-1.5 w-1.5" style={{ background: st.color }} />

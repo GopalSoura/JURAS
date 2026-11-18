@@ -27,3 +27,11 @@ for the optional WebSocket message contract and demo controls.
 
 Backend CORS currently permits localhost:5173. Data is in-memory for this first runnable scaffold;
 Member 1 should replace it with PostgreSQL/PostGIS in Sprint task 2.
+
+## Wokwi hardware nodes
+
+Three ESP32 sensor nodes (fire, structural, stormwater) post live readings to
+`POST /api/v1/readings`. They run in the wokwi.com online editor and reach this
+machine through a public tunnel; they appear in the dashboard's **REALTIME**
+mode. See [firmware/README.md](firmware/README.md) for the sketches, wiring,
+`diagram.json` circuit files, and the two-laptop run instructions.
